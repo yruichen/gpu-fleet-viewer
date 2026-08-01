@@ -8,6 +8,7 @@ design-qa.md
 .vsixmanifest
 *.log
 .vscode-test/
+.playwright-cli/
 .DS_Store
 .env
 .env.*

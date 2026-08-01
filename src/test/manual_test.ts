@@ -3,6 +3,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { GpuMonitor } from '../gpuMonitor';
+import {
+    aggregateUsers,
+    decorateGpus,
+    evaluateAvailability,
+    markDuplicateServers,
+    ServerStatus,
+    summarizeFleet
+} from '../fleetModel';
 import { SshConfigParser } from '../sshConfig';
 
 const dummyXml = `<?xml version="1.0" ?>
@@ -58,6 +66,80 @@ async function runTest(): Promise<void> {
         assert.strictEqual(queriedGpus[0].fanSpeed, '34 %');
         assert.strictEqual(queriedGpus[0].processes[0].name, '/usr/bin/python,worker');
         assert.strictEqual(queriedGpus[0].processes[0].user, 'alice');
+        assert.strictEqual(queriedGpus[0].processes[0].command, '/usr/bin/python,worker');
+
+        const monitor = new GpuMonitor();
+        const health = monitor.parseHostHealth('1.25|0.80|0.50|262144|196608|1048576|524288|86400');
+        assert.ok(health);
+        assert.strictEqual(health?.memoryTotalMiB, 256);
+        assert.strictEqual(health?.memoryUsedMiB, 64);
+        assert.strictEqual(health?.diskUsedMiB, 512);
+        assert.strictEqual(health?.uptimeSeconds, 86400);
+
+        const availabilitySettings = {
+            availabilityRequireNoProcesses: true,
+            availabilityMaxMemoryMiB: 512,
+            availabilityMaxUtilization: 10
+        };
+        const busy = evaluateAvailability(queriedGpus[0], availabilitySettings);
+        assert.strictEqual(busy.available, false);
+        assert.ok(busy.reasons.some(reason => reason.includes('compute process')));
+
+        const freeGpu = {
+            ...queriedGpus[0],
+            memory: { ...queriedGpus[0].memory, used: '256 MiB', free: '24308 MiB' },
+            utilization: { ...queriedGpus[0].utilization, gpu: '10 %' },
+            processes: []
+        };
+        assert.strictEqual(evaluateAvailability(freeGpu, availabilitySettings).available, true);
+        const decorated = decorateGpus([freeGpu], availabilitySettings);
+        const now = Date.now();
+        const servers: ServerStatus[] = markDuplicateServers([
+            { host: 'primary', gpus: decorated, collectedAt: now, latencyMs: 10, stale: false },
+            { host: 'secondary', gpus: decorated, collectedAt: now, latencyMs: 12, stale: false }
+        ]);
+        assert.strictEqual(servers[1].duplicateOf, 'primary');
+        const summary = summarizeFleet(servers, {
+            memoryWarningThreshold: 85,
+            temperatureWarningThreshold: 80,
+            powerWarningThreshold: 90
+        });
+        assert.strictEqual(summary.gpusTotal, 1);
+        assert.strictEqual(summary.gpusAvailable, 1);
+
+        const userGpu = {
+            ...decorated[0],
+            processes: [{
+                pid: '55', user: 'researcher', name: 'python', command: 'python train.py',
+                elapsedSeconds: 120, usedMemory: '400 MiB'
+            }]
+        };
+        const users = aggregateUsers([{
+            host: 'primary', gpus: [userGpu], collectedAt: now, latencyMs: 10, stale: false
+        }]);
+        assert.deepStrictEqual(users[0], {
+            user: 'researcher', gpuCount: 1, processCount: 1, memoryMiB: 400
+        });
+
+        const performanceStartedAt = Date.now();
+        const largeFleet: ServerStatus[] = Array.from({ length: 100 }, (_, serverIndex) => ({
+            host: `node-${serverIndex}`,
+            collectedAt: now,
+            latencyMs: 20,
+            stale: false,
+            gpus: Array.from({ length: 8 }, (_, gpuIndex) => ({
+                ...decorated[0],
+                index: String(gpuIndex),
+                uuid: `GPU-${serverIndex}-${gpuIndex}`
+            }))
+        }));
+        const largeSummary = summarizeFleet(markDuplicateServers(largeFleet), {
+            memoryWarningThreshold: 85,
+            temperatureWarningThreshold: 80,
+            powerWarningThreshold: 90
+        });
+        assert.strictEqual(largeSummary.gpusTotal, 800);
+        assert.ok(Date.now() - performanceStartedAt < 1000, 'Fleet aggregation should remain sub-second for 800 GPUs.');
 
         console.log('GPU monitor and SSH config tests passed.');
     } finally {

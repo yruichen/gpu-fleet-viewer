@@ -12,7 +12,7 @@
 	},
 	"author": "yruichen",
 	"license": "Apache-2.0",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"icon": "resources/icon.png",
 	"publisher": "yruichen",
 	"pricing": "Free",
@@ -26,7 +26,11 @@
 		"nvidia-smi",
 		"ssh",
 		"monitoring",
-		"machine-learning"
+		"machine-learning",
+		"research",
+		"hpc",
+		"slurm",
+		"cuda"
 	],
 	"engines": {
 		"vscode": "^1.80.0"
@@ -77,6 +81,12 @@
 				"title": "Open Dashboard",
 				"category": "GPU Fleet Viewer",
 				"icon": "$(dashboard)"
+			},
+			{
+				"command": "gpu-fleet-viewer.findAvailableGpu",
+				"title": "Find Available GPU",
+				"category": "GPU Fleet Viewer",
+				"icon": "$(search-fuzzy)"
 			},
 			{
 				"command": "gpu-fleet-viewer.connectSsh",
@@ -174,6 +184,18 @@
 					"maximum": 60,
 					"description": "SSH connection and command timeout in seconds"
 				},
+				"gpu-fleet-viewer.maxConcurrentHosts": {
+					"type": "number",
+					"default": 8,
+					"minimum": 1,
+					"maximum": 32,
+					"description": "Maximum number of SSH hosts queried concurrently"
+				},
+				"gpu-fleet-viewer.pauseWhenHidden": {
+					"type": "boolean",
+					"default": true,
+					"description": "Pause automatic SSH refreshes while the dashboard is hidden"
+				},
 				"gpu-fleet-viewer.compactLayout": {
 					"type": "boolean",
 					"default": true,
@@ -204,6 +226,42 @@
 					"default": true,
 					"description": "Show GPU processes, owners, PIDs, and memory usage in a collapsible section"
 				},
+				"gpu-fleet-viewer.showHostHealth": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show lightweight CPU load, RAM, root disk, uptime, and SSH latency metrics"
+				},
+				"gpu-fleet-viewer.enableSlurmIntegration": {
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically associate GPU processes with Slurm jobs when Slurm is available"
+				},
+				"gpu-fleet-viewer.slurmRefreshInterval": {
+					"type": "number",
+					"default": 30,
+					"minimum": 5,
+					"maximum": 300,
+					"description": "Seconds between Slurm job metadata refreshes"
+				},
+				"gpu-fleet-viewer.availabilityRequireNoProcesses": {
+					"type": "boolean",
+					"default": true,
+					"description": "Require a GPU to have no compute processes before it is considered available"
+				},
+				"gpu-fleet-viewer.availabilityMaxMemoryMiB": {
+					"type": "number",
+					"default": 512,
+					"minimum": 0,
+					"maximum": 1048576,
+					"description": "Maximum used GPU memory in MiB for an available GPU"
+				},
+				"gpu-fleet-viewer.availabilityMaxUtilization": {
+					"type": "number",
+					"default": 10,
+					"minimum": 0,
+					"maximum": 100,
+					"description": "Maximum GPU utilization percentage for an available GPU"
+				},
 				"gpu-fleet-viewer.showStatusBar": {
 					"type": "boolean",
 					"default": true,
@@ -213,6 +271,23 @@
 					"type": "boolean",
 					"default": false,
 					"description": "Show notifications when a GPU first crosses a warning threshold"
+				},
+				"gpu-fleet-viewer.notificationEvents": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"enum": ["serverState", "gpuAvailable", "threshold"]
+					},
+					"uniqueItems": true,
+					"default": ["serverState", "gpuAvailable", "threshold"],
+					"description": "State transitions that may produce notifications when notifications are enabled"
+				},
+				"gpu-fleet-viewer.notificationCooldownSeconds": {
+					"type": "number",
+					"default": 60,
+					"minimum": 0,
+					"maximum": 3600,
+					"description": "Minimum time between GPU Fleet notification batches"
 				},
 				"gpu-fleet-viewer.memoryWarningThreshold": {
 					"type": "number",

@@ -1,6 +1,7 @@
 .eslintrc.json
 .gitignore
 .vscode-test/**
+.playwright-cli/**
 src/**
 scripts/**
 preview/**

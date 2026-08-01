@@ -12,7 +12,7 @@ Module._load = function load(request, parent, isMain) {
 
 const { GpuViewPanel } = require('../out/gpuView');
 const panel = Object.create(GpuViewPanel.prototype);
-let html = panel._getWebviewContent();
+let html = panel.getWebviewContent();
 const nonce = html.match(/<script nonce="([^"]+)">/)[1];
 
 function gpu(index, name, used, total, utilization, temperature, power, limit, fan, processes = []) {
@@ -25,7 +25,15 @@ function gpu(index, name, used, total, utilization, temperature, power, limit, f
         temperature: { gpu: `${temperature} C` },
         power: { draw: `${power.toFixed(1)} W`, limit: `${limit.toFixed(1)} W` },
         fanSpeed: fan === null ? 'N/A' : `${fan} %`,
-        processes
+        processes,
+        availability: {
+            available: processes.length === 0 && used <= 512 && utilization <= 10,
+            reasons: [
+                ...(processes.length ? [processes.length + ' compute processes'] : []),
+                ...(used > 512 ? [used + ' MiB memory used'] : []),
+                ...(utilization > 10 ? [utilization + '% utilization'] : [])
+            ]
+        }
     };
 }
 
@@ -33,7 +41,10 @@ const trainingProcess = (pid, user, usedMemory) => ({
     pid: String(pid),
     user,
     name: '/opt/conda/bin/python3',
-    usedMemory: `${usedMemory} MiB`
+    command: '/opt/conda/bin/python3 train.py --config experiments/large.yaml',
+    elapsedSeconds: 18420,
+    usedMemory: `${usedMemory} MiB`,
+    slurm: user === 'ml-team' ? { id: '18422', name: 'llm-pretrain', state: 'RUNNING' } : undefined
 });
 
 const v100Memory = [24814, 30720, 4, 30742, 4, 24814, 26948, 26642];
@@ -60,6 +71,10 @@ const v100s = v100Memory.map((used, index) => gpu(
 const data = [
     {
         host: 'a6000-east',
+        collectedAt: Date.now(), latencyMs: 84, lastSuccessAt: Date.now(), stale: false,
+        healthAvailable: true, slurmAvailable: false,
+        health: { load1: 3.2, load5: 2.8, load15: 2.4, memoryTotalMiB: 262144, memoryUsedMiB: 98304, diskTotalMiB: 1953514, diskUsedMiB: 702118, uptimeSeconds: 918240 },
+        metadata: { alias: 'Vision Lab A', group: 'A6000', favorite: true },
         gpus: [
             gpu(0, 'NVIDIA RTX A6000', 10, 49140, 0, 31, 22, 300, 30),
             gpu(1, 'NVIDIA RTX A6000', 10, 49140, 0, 32, 23, 300, 31)
@@ -67,14 +82,23 @@ const data = [
     },
     {
         host: 'a6000-west',
+        collectedAt: Date.now(), latencyMs: 96, lastSuccessAt: Date.now(), stale: false,
+        healthAvailable: true, slurmAvailable: false,
+        health: { load1: 1.1, load5: 1.4, load15: 1.2, memoryTotalMiB: 262144, memoryUsedMiB: 65536, diskTotalMiB: 1953514, diskUsedMiB: 542118, uptimeSeconds: 518240 },
         gpus: [
             gpu(0, 'NVIDIA RTX A6000', 10, 49140, 0, 34, 25, 300, 30),
             gpu(1, 'NVIDIA RTX A6000', 10, 49140, 0, 33, 24, 300, 30)
         ]
     },
-    { host: 'v100-cluster', gpus: v100s },
+    { host: 'v100-cluster', collectedAt: Date.now(), latencyMs: 71, lastSuccessAt: Date.now(), stale: false,
+        healthAvailable: true, slurmAvailable: true,
+        health: { load1: 18.4, load5: 16.2, load15: 14.8, memoryTotalMiB: 524288, memoryUsedMiB: 412720, diskTotalMiB: 3907028, diskUsedMiB: 1884210, uptimeSeconds: 1818240 },
+        metadata: { alias: 'V100 Research Cluster', group: 'Shared Lab' }, gpus: v100s },
     {
         host: 'studio-4090',
+        collectedAt: Date.now(), latencyMs: 42, lastSuccessAt: Date.now(), stale: false,
+        healthAvailable: true, slurmAvailable: false,
+        health: { load1: 4.7, load5: 4.3, load15: 3.9, memoryTotalMiB: 131072, memoryUsedMiB: 74218, diskTotalMiB: 1953514, diskUsedMiB: 1224118, uptimeSeconds: 318240 },
         gpus: [
             gpu(0, 'NVIDIA GeForce RTX 4090 D', 24017, 24564, 96, 72, 420, 450, 72, [trainingProcess(38291, 'alice', 23840)]),
             gpu(1, 'NVIDIA GeForce RTX 4090 D', 10, 24564, 0, 35, 18, 450, 30)
@@ -93,6 +117,10 @@ const previewMessage = {
         showPower: true,
         showFanSpeed: true,
         showProcesses: true,
+        showHostHealth: true,
+        availabilityRequireNoProcesses: true,
+        availabilityMaxMemoryMiB: 512,
+        availabilityMaxUtilization: 10,
         memoryWarningThreshold: 85,
         temperatureWarningThreshold: 80,
         powerWarningThreshold: 90
@@ -102,13 +130,19 @@ const previewMessage = {
         serversTotal: 4,
         gpusAvailable: 6,
         gpusTotal: 14,
+        warnings: 5,
         memoryPercent: 49,
         memoryUsed: 201164,
         memoryTotal: 410308,
         utilizationPercent: 56,
         powerDraw: 2518,
         updatedAt: Date.now()
-    }
+    },
+    users: [
+        { user: 'ml-team', gpuCount: 2, processCount: 14, memoryMiB: 61404 },
+        { user: 'alice', gpuCount: 2, processCount: 2, memoryMiB: 50482 },
+        { user: 'research', gpuCount: 3, processCount: 3, memoryMiB: 77844 }
+    ]
 };
 
 const theme = `<style>
@@ -151,6 +185,8 @@ html = html.replace(
             document.getElementById('refresh-state').textContent = 'Connect requested for ' + message.host;
         } else if (message.command === 'settings') {
             document.getElementById('refresh-state').textContent = 'Settings command requested';
+        } else if (message.command === 'openGpuTerminal' || message.command === 'copyValue') {
+            document.getElementById('refresh-state').textContent = message.command + ' requested';
         }
     } };`
 );
