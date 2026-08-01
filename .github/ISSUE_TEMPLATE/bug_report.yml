@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a reproducible problem in GPU Fleet Viewer
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping improve GPU Fleet Viewer. Remove private host, user, and process information before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: Extension version
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: vscode
+    attributes:
+      label: VS Code and operating system
+      placeholder: VS Code 1.xx on macOS, Linux, or Windows
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the actual and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open GPU Fleet
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or screenshots
+      description: Do not include credentials, real hostnames, IP addresses, usernames, or sensitive process data.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I removed private infrastructure and user information.
+          required: true
+        - label: Key-based SSH and `nvidia-smi` work outside the extension.
+          required: true

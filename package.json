@@ -1,0 +1,265 @@
+{
+	"name": "gpu-fleet-viewer",
+	"displayName": "GPU Fleet Viewer",
+	"description": "A fast, privacy-friendly VS Code dashboard for monitoring NVIDIA GPU fleets over SSH",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/yruichen/gpu-fleet-viewer.git"
+	},
+	"homepage": "https://github.com/yruichen/gpu-fleet-viewer#readme",
+	"bugs": {
+		"url": "https://github.com/yruichen/gpu-fleet-viewer/issues"
+	},
+	"author": "yruichen",
+	"license": "Apache-2.0",
+	"version": "1.0.0",
+	"icon": "resources/icon.png",
+	"publisher": "yruichen",
+	"keywords": [
+		"gpu",
+		"nvidia",
+		"nvidia-smi",
+		"ssh",
+		"monitoring",
+		"machine-learning"
+	],
+	"engines": {
+		"vscode": "^1.80.0"
+	},
+	"categories": [
+		"Other",
+		"Visualization"
+	],
+	"extensionKind": [
+		"ui",
+		"workspace"
+	],
+	"activationEvents": [],
+	"main": "./out/extension.js",
+	"contributes": {
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "gpu-fleet-viewer",
+					"title": "GPU Fleet",
+					"icon": "resources/gpu-icon.svg"
+				}
+			]
+		},
+		"views": {
+			"gpu-fleet-viewer": [
+				{
+					"id": "gpuServerList",
+					"name": "Servers",
+					"icon": "resources/gpu-icon.svg"
+				}
+			]
+		},
+		"commands": [
+			{
+				"command": "gpu-fleet-viewer.refresh",
+				"title": "Refresh GPU Status",
+				"category": "GPU Fleet Viewer",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "gpu-fleet-viewer.addServer",
+				"title": "Add Server",
+				"category": "GPU Fleet Viewer"
+			},
+			{
+				"command": "gpu-fleet-viewer.openDashboard",
+				"title": "Open Dashboard",
+				"category": "GPU Fleet Viewer",
+				"icon": "$(dashboard)"
+			},
+			{
+				"command": "gpu-fleet-viewer.connectSsh",
+				"title": "Connect SSH",
+				"category": "GPU Fleet Viewer",
+				"icon": "$(remote)"
+			},
+			{
+				"command": "gpu-fleet-viewer.configureServers",
+				"title": "Configure Servers",
+				"category": "GPU Fleet Viewer",
+				"icon": "$(gear)"
+			},
+			{
+				"command": "gpu-fleet-viewer.openSettings",
+				"title": "GPU Fleet Viewer Settings",
+				"category": "GPU Fleet Viewer",
+				"icon": "$(settings-gear)"
+			}
+		],
+		"menus": {
+			"view/title": [
+				{
+					"command": "gpu-fleet-viewer.configureServers",
+					"when": "view == gpuServerList",
+					"group": "navigation"
+				},
+				{
+					"command": "gpu-fleet-viewer.refresh",
+					"when": "view == gpuServerList",
+					"group": "navigation"
+				},
+				{
+					"command": "gpu-fleet-viewer.addServer",
+					"when": "view == gpuServerList",
+					"group": "navigation"
+				}
+			],
+			"view/item/context": [
+				{
+					"command": "gpu-fleet-viewer.connectSsh",
+					"when": "view == gpuServerList && viewItem == server",
+					"group": "inline"
+				}
+			]
+		},
+		"configuration": {
+			"title": "GPU Fleet Viewer",
+			"properties": {
+				"gpu-fleet-viewer.sshConfigPath": {
+					"type": "string",
+					"default": "~/.ssh/config",
+					"description": "Path to SSH config file"
+				},
+				"gpu-fleet-viewer.targets": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [],
+					"description": "List of SSH hosts to monitor"
+				},
+				"gpu-fleet-viewer.additionalHosts": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [],
+					"description": "Additional SSH targets (host alias, IP address, or user@host)"
+				},
+				"gpu-fleet-viewer.ignoredHosts": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [],
+					"description": "List of SSH hosts to ignore"
+				},
+				"gpu-fleet-viewer.autoRefresh": {
+					"type": "boolean",
+					"default": true,
+					"description": "Enable auto-refresh of GPU status"
+				},
+				"gpu-fleet-viewer.refreshInterval": {
+					"type": "number",
+					"default": 5,
+					"minimum": 2,
+					"maximum": 300,
+					"description": "Refresh interval in seconds"
+				},
+				"gpu-fleet-viewer.sshTimeout": {
+					"type": "number",
+					"default": 8,
+					"minimum": 2,
+					"maximum": 60,
+					"description": "SSH connection and command timeout in seconds"
+				},
+				"gpu-fleet-viewer.compactLayout": {
+					"type": "boolean",
+					"default": true,
+					"description": "Use a dense multi-column layout for servers with many GPUs"
+				},
+				"gpu-fleet-viewer.showUtilization": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show GPU utilization"
+				},
+				"gpu-fleet-viewer.showTemperature": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show GPU temperature"
+				},
+				"gpu-fleet-viewer.showPower": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show power draw and power limit"
+				},
+				"gpu-fleet-viewer.showFanSpeed": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show fan speed when reported by the GPU"
+				},
+				"gpu-fleet-viewer.showProcesses": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show GPU processes, owners, PIDs, and memory usage in a collapsible section"
+				},
+				"gpu-fleet-viewer.showStatusBar": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show aggregate GPU availability in the VS Code status bar"
+				},
+				"gpu-fleet-viewer.enableNotifications": {
+					"type": "boolean",
+					"default": false,
+					"description": "Show notifications when a GPU first crosses a warning threshold"
+				},
+				"gpu-fleet-viewer.memoryWarningThreshold": {
+					"type": "number",
+					"default": 85,
+					"minimum": 1,
+					"maximum": 100,
+					"description": "Memory usage percentage that triggers warning styling"
+				},
+				"gpu-fleet-viewer.temperatureWarningThreshold": {
+					"type": "number",
+					"default": 80,
+					"minimum": 1,
+					"maximum": 120,
+					"description": "Temperature in Celsius that triggers warning styling"
+				},
+				"gpu-fleet-viewer.powerWarningThreshold": {
+					"type": "number",
+					"default": 90,
+					"minimum": 1,
+					"maximum": 100,
+					"description": "Power limit percentage that triggers warning styling"
+				}
+			}
+		}
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "tsc -p ./",
+		"dev": "npm run compile && node scripts/renderPreview.js && python3 -m http.server 8765 --bind 127.0.0.1",
+		"preview:build": "npm run compile && node scripts/renderPreview.js",
+		"watch": "tsc -watch -p ./",
+		"pretest": "npm run compile && npm run lint",
+		"lint": "eslint src --ext ts",
+		"test": "node ./out/test/manual_test.js && npm run preview:build && node scripts/checkWebview.js"
+	},
+	"devDependencies": {
+		"@types/glob": "^8.1.0",
+		"@types/mocha": "^10.0.1",
+		"@types/node": "20.2.5",
+		"@types/vscode": "^1.80.0",
+		"@types/xml2js": "^0.4.11",
+		"@typescript-eslint/eslint-plugin": "^5.59.8",
+		"@typescript-eslint/parser": "^5.59.8",
+		"@vscode/test-electron": "^2.3.2",
+		"@vscode/vsce": "^3.9.2",
+		"eslint": "^8.41.0",
+		"glob": "^8.1.0",
+		"jsdom": "^30.0.1",
+		"mocha": "^10.2.0",
+		"typescript": "^5.1.3"
+	},
+	"dependencies": {
+		"xml2js": "^0.6.2"
+	}
+}

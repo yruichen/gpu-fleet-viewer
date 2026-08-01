@@ -1,0 +1,15 @@
+node_modules/
+out/
+preview/
+output/
+design/
+design-qa.md
+*.vsix
+.vsixmanifest
+*.log
+.vscode-test/
+.DS_Store
+.env
+.env.*
+resources/dashboard.png
+resources/detail.png
