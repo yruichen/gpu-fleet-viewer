@@ -11,14 +11,24 @@ const configurationKeys = [
     'autoRefresh',
     'refreshInterval',
     'sshTimeout',
+    'maxConcurrentHosts',
+    'pauseWhenHidden',
     'compactLayout',
     'showUtilization',
     'showTemperature',
     'showPower',
     'showFanSpeed',
     'showProcesses',
+    'showHostHealth',
+    'enableSlurmIntegration',
+    'slurmRefreshInterval',
+    'availabilityRequireNoProcesses',
+    'availabilityMaxMemoryMiB',
+    'availabilityMaxUtilization',
     'showStatusBar',
     'enableNotifications',
+    'notificationEvents',
+    'notificationCooldownSeconds',
     'memoryWarningThreshold',
     'temperatureWarningThreshold',
     'powerWarningThreshold'
@@ -68,7 +78,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     };
 
     const openDashboard = (host?: string) => {
-        GpuViewPanel.createOrShow(context.extensionUri, host, host ? undefined : updateStatusBar);
+        GpuViewPanel.createOrShow(context, host, host ? undefined : updateStatusBar);
     };
 
     context.subscriptions.push(
@@ -116,6 +126,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }),
         vscode.commands.registerCommand('gpu-fleet-viewer.openServer', (host: string) => openDashboard(host)),
         vscode.commands.registerCommand('gpu-fleet-viewer.openDashboard', () => openDashboard()),
+        vscode.commands.registerCommand('gpu-fleet-viewer.findAvailableGpu', () => {
+            void GpuViewPanel.showAvailableGpuQuickPick();
+        }),
         vscode.commands.registerCommand('gpu-fleet-viewer.openSettings', () => {
             void vscode.commands.executeCommand(
                 'workbench.action.openSettings',

@@ -2,6 +2,19 @@
 
 All notable changes to GPU Fleet Viewer are documented here.
 
+## 1.1.0 - 2026-08-01
+
+- Reframed the dashboard around the daily research workflow: find a GPU, understand its owner and job, and enter a prepared SSH environment.
+- Added configurable, explainable availability rules based on compute processes, used memory, and utilization.
+- Added fleet search, status filters, GPU sorting, active-user aggregation, and an available-GPU Quick Pick command.
+- Added full process commands, runtimes, copy actions, and best-effort Slurm job association.
+- Added safe research terminals that prepare UUID-based `CUDA_VISIBLE_DEVICES` commands without executing them.
+- Added lightweight CPU load, host memory, root disk, uptime, SSH latency, stale-data timestamps, and categorized connection errors.
+- Added local aliases, groups, favorites, and duplicate physical-host detection with aggregate de-duplication.
+- Added server and GPU state notifications with event selection and cooldown controls.
+- Improved performance with bounded SSH concurrency, hidden-dashboard pausing, low-frequency Slurm caching, duplicate-host query suppression, and client-side filtering.
+- Expanded parser, availability, aggregation, duplicate-host, responsive Webview, filter, and inspector tests.
+
 ## 1.0.0 - 2026-08-01
 
 - Published GPU Fleet Viewer on the Visual Studio Marketplace as `yruichen.gpu-fleet-viewer`.

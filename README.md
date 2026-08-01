@@ -6,20 +6,24 @@
 [![Latest release](https://img.shields.io/github/v/release/yruichen/gpu-fleet-viewer)](https://github.com/yruichen/gpu-fleet-viewer/releases/latest)
 [![License](https://img.shields.io/github/license/yruichen/gpu-fleet-viewer)](LICENSE.txt)
 
-A fast, compact VS Code dashboard for monitoring NVIDIA GPU fleets over SSH. See utilization, memory, temperature, power, fan speed, and running processes without leaving your editor.
+A fast, privacy-friendly research workstation for finding, understanding, and using NVIDIA GPUs across SSH servers without leaving VS Code.
 
-![GPU Fleet Viewer dashboard](docs/dashboard.png)
+![GPU Fleet Viewer 1.1 research dashboard](docs/dashboard-1.1.0.png)
 
 ## Highlights
 
-- Fleet summary across every configured SSH host.
-- Responsive server bands and equal-height GPU tiles for dense multi-GPU machines.
+- Find available GPUs across every configured SSH host with explainable availability rules.
+- Search and filter by server, GPU model, user, process command, or Slurm job.
+- Responsive server bands and independent process inspectors for dense 8-GPU machines.
 - GPU utilization, memory, temperature, power draw/limit, and fan speed.
-- Click-to-inspect process details: owner, PID, command, and GPU memory.
+- Click-to-inspect process details: owner, PID, full command, runtime, GPU memory, and optional Slurm job.
+- One-click research terminals with a stable GPU UUID in `CUDA_VISIBLE_DEVICES`; commands are prepared but never auto-executed.
+- Lightweight host health for CPU load, RAM, root disk, uptime, and SSH latency.
+- Local server aliases, groups, favorites, and duplicate physical-host detection.
 - Configurable metrics, warning thresholds, notifications, refresh interval, and SSH timeout.
 - Available-GPU count in the VS Code status bar.
 - Direct **Connect SSH** action for Remote - SSH users.
-- Fast CSV-based `nvidia-smi` collection with overlapping-refresh protection.
+- High-performance SSH snapshots, bounded concurrency, hidden-panel pausing, cached Slurm metadata, duplicate-query suppression, and overlapping-refresh protection.
 - No telemetry and no stored passwords or private keys.
 
 ## Requirements
@@ -41,7 +45,7 @@ code --install-extension yruichen.gpu-fleet-viewer
 For offline installation, download the latest `.vsix` from [GitHub Releases](https://github.com/yruichen/gpu-fleet-viewer/releases/latest), then run:
 
 ```bash
-code --install-extension gpu-fleet-viewer-1.0.0.vsix
+code --install-extension gpu-fleet-viewer-1.1.0.vsix
 ```
 
 Reload VS Code and open **GPU Fleet** from the Activity Bar.
@@ -59,6 +63,15 @@ Host gpu-node-01
 
 You can also run **GPU Fleet Viewer: Add Server** and enter an SSH alias, hostname, IP address, or `user@host`. Use **Configure Servers** from the view toolbar to hide hosts you do not want to monitor.
 
+## Research workflow
+
+1. Run **GPU Fleet Viewer: Find Available GPU**, or filter the dashboard to **Available**.
+2. Review the availability explanation, free memory, host health, and active users.
+3. Select **Open terminal**. The extension creates an integrated terminal and prepares an SSH command that exports `CUDA_DEVICE_ORDER=PCI_BUS_ID` and the selected GPU UUID.
+4. Inspect the command and press Enter when ready. GPU Fleet Viewer never starts or stops research jobs automatically.
+
+When Slurm is installed, the extension detects it automatically and associates local GPU processes with visible job metadata. Ordinary SSH servers continue to work without Slurm.
+
 ## Settings
 
 Search for `GPU Fleet Viewer` in VS Code Settings.
@@ -68,12 +81,20 @@ Search for `GPU Fleet Viewer` in VS Code Settings.
 | `gpu-fleet-viewer.autoRefresh` | `true` | Refresh automatically |
 | `gpu-fleet-viewer.refreshInterval` | `5` | Refresh interval in seconds |
 | `gpu-fleet-viewer.sshTimeout` | `8` | SSH and command timeout in seconds |
+| `gpu-fleet-viewer.maxConcurrentHosts` | `8` | Bound concurrent SSH snapshots |
+| `gpu-fleet-viewer.pauseWhenHidden` | `true` | Stop automatic SSH work while the dashboard is hidden |
 | `gpu-fleet-viewer.compactLayout` | `true` | Use the dense fleet matrix |
 | `gpu-fleet-viewer.showUtilization` | `true` | Show GPU utilization |
 | `gpu-fleet-viewer.showTemperature` | `true` | Show GPU temperature |
 | `gpu-fleet-viewer.showPower` | `true` | Show power draw and limit |
 | `gpu-fleet-viewer.showFanSpeed` | `true` | Show fan speed when supported |
 | `gpu-fleet-viewer.showProcesses` | `true` | Show process inspection |
+| `gpu-fleet-viewer.showHostHealth` | `true` | Show load, RAM, disk, uptime, and latency |
+| `gpu-fleet-viewer.enableSlurmIntegration` | `true` | Detect Slurm and associate jobs |
+| `gpu-fleet-viewer.slurmRefreshInterval` | `30` | Cache duration for Slurm metadata |
+| `gpu-fleet-viewer.availabilityRequireNoProcesses` | `true` | Require no compute processes |
+| `gpu-fleet-viewer.availabilityMaxMemoryMiB` | `512` | Maximum used memory for availability |
+| `gpu-fleet-viewer.availabilityMaxUtilization` | `10` | Maximum utilization for availability |
 | `gpu-fleet-viewer.showStatusBar` | `true` | Show fleet availability in the status bar |
 | `gpu-fleet-viewer.enableNotifications` | `false` | Notify on newly crossed warning thresholds |
 
@@ -81,7 +102,7 @@ Target lists, ignored hosts, SSH config path, and warning thresholds are also co
 
 ## Security and privacy
 
-GPU Fleet Viewer invokes your system `ssh` client with argument-safe execution, key-only batch mode, and a configurable timeout. It reads your SSH config but never reads or stores private-key contents. Monitoring data stays between VS Code and the servers you configured; the extension has no telemetry service.
+GPU Fleet Viewer invokes your system `ssh` client with argument-safe execution, key-only batch mode, and a configurable timeout. Hosts and GPU identifiers received from the Webview are validated again in the extension host. It reads your SSH config but never reads or stores private-key contents. Monitoring data stays between VS Code and the servers you configured; the extension has no telemetry service, backend, persistent metric history, or job-control endpoint.
 
 Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
