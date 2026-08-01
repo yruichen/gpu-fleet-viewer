@@ -1,9 +1,10 @@
 # GPU Fleet Viewer
 
 [![CI](https://github.com/yruichen/gpu-fleet-viewer/actions/workflows/ci.yml/badge.svg)](https://github.com/yruichen/gpu-fleet-viewer/actions/workflows/ci.yml)
+[![Marketplace](https://img.shields.io/visual-studio-marketplace/v/yruichen.gpu-fleet-viewer?label=Marketplace&logo=visualstudiocode)](https://marketplace.visualstudio.com/items?itemName=yruichen.gpu-fleet-viewer)
+[![Marketplace installs](https://img.shields.io/visual-studio-marketplace/i/yruichen.gpu-fleet-viewer)](https://marketplace.visualstudio.com/items?itemName=yruichen.gpu-fleet-viewer)
 [![Latest release](https://img.shields.io/github/v/release/yruichen/gpu-fleet-viewer)](https://github.com/yruichen/gpu-fleet-viewer/releases/latest)
 [![License](https://img.shields.io/github/license/yruichen/gpu-fleet-viewer)](LICENSE.txt)
-[![VS Code](https://img.shields.io/badge/VS%20Code-1.80%2B-007ACC?logo=visualstudiocode)](https://code.visualstudio.com/)
 
 A fast, compact VS Code dashboard for monitoring NVIDIA GPU fleets over SSH. See utilization, memory, temperature, power, fan speed, and running processes without leaving your editor.
 
@@ -31,7 +32,13 @@ A fast, compact VS Code dashboard for monitoring NVIDIA GPU fleets over SSH. See
 
 ## Install
 
-Download the latest `.vsix` from [Releases](https://github.com/yruichen/gpu-fleet-viewer/releases/latest), then run:
+Install [GPU Fleet Viewer from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=yruichen.gpu-fleet-viewer), search for `GPU Fleet Viewer` in the VS Code Extensions view, or run:
+
+```bash
+code --install-extension yruichen.gpu-fleet-viewer
+```
+
+For offline installation, download the latest `.vsix` from [GitHub Releases](https://github.com/yruichen/gpu-fleet-viewer/releases/latest), then run:
 
 ```bash
 code --install-extension gpu-fleet-viewer-1.0.0.vsix
@@ -78,6 +85,10 @@ GPU Fleet Viewer invokes your system `ssh` client with argument-safe execution, 
 
 Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
+## Support
+
+See [SUPPORT.md](SUPPORT.md) for troubleshooting and support channels. Bug reports and feature requests are welcome in [GitHub Issues](https://github.com/yruichen/gpu-fleet-viewer/issues).
+
 ## Development
 
 ```bash
@@ -95,7 +106,7 @@ python3 -m http.server 8765 --bind 127.0.0.1
 
 Then open `http://127.0.0.1:8765/preview/`.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
+See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change. Maintainers can find the release checklist in [docs/PUBLISHING.md](docs/PUBLISHING.md).
 
 ## Acknowledgements
 

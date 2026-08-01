@@ -4,6 +4,7 @@ All notable changes to GPU Fleet Viewer are documented here.
 
 ## 1.0.0 - 2026-08-01
 
+- Published GPU Fleet Viewer on the Visual Studio Marketplace as `yruichen.gpu-fleet-viewer`.
 - Introduced the GPU Fleet Viewer name and a consistent extension namespace.
 - Added automatic migration of settings from the legacy `gpu-server-viewer` namespace.
 - Redesigned the dashboard around a fleet summary, server bands, and a responsive GPU matrix.

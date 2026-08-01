@@ -15,6 +15,11 @@
 	"version": "1.0.0",
 	"icon": "resources/icon.png",
 	"publisher": "yruichen",
+	"pricing": "Free",
+	"galleryBanner": {
+		"color": "#1f2428",
+		"theme": "dark"
+	},
 	"keywords": [
 		"gpu",
 		"nvidia",
