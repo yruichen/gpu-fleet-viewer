@@ -51,6 +51,7 @@ export interface GpuStatusSummary {
     memoryTotal: number;
     utilizationPercent: number;
     powerDraw: number;
+    powerLimit: number;
     updatedAt: number;
 }
 
@@ -137,6 +138,7 @@ export function summarizeFleet(data: ServerStatus[], settings: {
     const memoryTotal = gpus.reduce((sum, gpu) => sum + numberValue(gpu.memory.total), 0);
     const utilization = gpus.reduce((sum, gpu) => sum + numberValue(gpu.utilization.gpu), 0);
     const powerDraw = gpus.reduce((sum, gpu) => sum + numberValue(gpu.power.draw), 0);
+    const powerLimit = gpus.reduce((sum, gpu) => sum + numberValue(gpu.power.limit), 0);
     const warnings = gpus.filter(gpu =>
         percent(gpu.memory.used, gpu.memory.total) >= settings.memoryWarningThreshold ||
         numberValue(gpu.temperature.gpu) >= settings.temperatureWarningThreshold ||
@@ -154,6 +156,7 @@ export function summarizeFleet(data: ServerStatus[], settings: {
         memoryTotal: Math.round(memoryTotal),
         utilizationPercent: gpus.length ? Math.round(utilization / gpus.length) : 0,
         powerDraw: Math.round(powerDraw),
+        powerLimit: Math.round(powerLimit),
         updatedAt: Date.now()
     };
 }

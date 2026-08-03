@@ -106,6 +106,7 @@ async function runTest(): Promise<void> {
         });
         assert.strictEqual(summary.gpusTotal, 1);
         assert.strictEqual(summary.gpusAvailable, 1);
+        assert.strictEqual(summary.powerLimit, 450);
 
         const userGpu = {
             ...decorated[0],

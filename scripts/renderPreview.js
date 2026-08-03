@@ -136,6 +136,7 @@ const previewMessage = {
         memoryTotal: 410308,
         utilizationPercent: 56,
         powerDraw: 2518,
+        powerLimit: 4200,
         updatedAt: Date.now()
     },
     users: [
@@ -185,6 +186,10 @@ html = html.replace(
             document.getElementById('refresh-state').textContent = 'Connect requested for ' + message.host;
         } else if (message.command === 'settings') {
             document.getElementById('refresh-state').textContent = 'Settings command requested';
+        } else if (message.command === 'setLanguage') {
+            window.__gpuPreview.language = message.language;
+            window.__gpuPreview.title = message.language === 'zh-CN' ? '科研 GPU 集群' : 'Fleet Summary';
+            window.postMessage(window.__gpuPreview, '*');
         } else if (message.command === 'openGpuTerminal' || message.command === 'copyValue') {
             document.getElementById('refresh-state').textContent = message.command + ' requested';
         }

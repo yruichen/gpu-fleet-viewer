@@ -78,6 +78,7 @@ Search for `GPU Fleet Viewer` in VS Code Settings.
 
 | Setting | Default | Purpose |
 | --- | ---: | --- |
+| `gpu-fleet-viewer.language` | `auto` | Follow VS Code or use English/简体中文; the dashboard toolbar also switches instantly |
 | `gpu-fleet-viewer.autoRefresh` | `true` | Refresh automatically |
 | `gpu-fleet-viewer.refreshInterval` | `5` | Refresh interval in seconds |
 | `gpu-fleet-viewer.sshTimeout` | `8` | SSH and command timeout in seconds |
@@ -128,6 +129,16 @@ python3 -m http.server 8765 --bind 127.0.0.1
 Then open `http://127.0.0.1:8765/preview/`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change. Maintainers can find the release checklist in [docs/PUBLISHING.md](docs/PUBLISHING.md).
+
+### Project directories
+
+- `src/` — extension source and tests.
+- `resources/` — extension icons and static assets.
+- `scripts/` — local preview and verification helpers.
+- `docs/` — contributor and publishing documentation.
+- `design/` — local design-work artifacts.
+- `releases/` — ignored local `.vsix` packages for manual verification.
+- `out/`, `preview/`, and `output/` — ignored generated build and preview files.
 
 ## Acknowledgements
 

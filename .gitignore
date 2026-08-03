@@ -5,6 +5,7 @@ output/
 design/
 design-qa.md
 *.vsix
+/releases/*.vsix
 .vsixmanifest
 *.log
 .vscode-test/

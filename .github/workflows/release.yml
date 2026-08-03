@@ -1,0 +1,87 @@
+name: Marketplace Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: marketplace-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+    steps:
+      - name: Check out tagged revision
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate release version
+        id: version
+        shell: bash
+        run: |
+          package_version=$(node -p "require('./package.json').version")
+          tag_version=${GITHUB_REF_NAME#v}
+          if [[ "$package_version" != "$tag_version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version $package_version." >&2
+            exit 1
+          fi
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "vsix=gpu-fleet-viewer-$package_version.vsix" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Marketplace credential
+        shell: bash
+        run: |
+          if [[ -z "$VSCE_PAT" ]]; then
+            echo "Repository secret VSCE_PAT is required for Marketplace publishing." >&2
+            exit 1
+          fi
+
+      - name: Test
+        run: npm test
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --registry=https://registry.npmjs.org
+
+      - name: Package extension
+        run: npx vsce package --out "${{ steps.version.outputs.vsix }}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: gpu-fleet-viewer-${{ steps.version.outputs.version }}
+          path: ${{ steps.version.outputs.vsix }}
+          if-no-files-found: error
+
+      - name: Publish to Visual Studio Marketplace
+        run: npx vsce publish --packagePath "${{ steps.version.outputs.vsix }}"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${{ steps.version.outputs.vsix }}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${{ steps.version.outputs.vsix }}" \
+              --verify-tag \
+              --generate-notes \
+              --title "GPU Fleet Viewer $GITHUB_REF_NAME"
+          fi
