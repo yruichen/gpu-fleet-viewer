@@ -13,7 +13,7 @@ import {
     ServerStatus,
     summarizeFleet
 } from './fleetModel';
-import { getDashboardCss, getDashboardScript } from './webviewTemplate';
+import { getDashboardCss, getDashboardScript, getDashboardTranslation } from './webviewTemplate';
 
 export { GpuStatusSummary } from './fleetModel';
 
@@ -34,10 +34,32 @@ interface ViewSettings {
 }
 
 type StatusUpdateHandler = (summary: GpuStatusSummary) => void;
+type UiLanguage = 'en' | 'zh-CN';
 const METADATA_KEY = 'gpu-fleet-viewer.serverMetadata';
+const AUTO_REFRESH_KEYS = ['autoRefresh', 'refreshInterval', 'pauseWhenHidden'] as const;
+const DATA_REFRESH_KEYS = [
+    'sshConfigPath', 'targets', 'additionalHosts', 'ignoredHosts', 'showProcesses',
+    'showHostHealth', 'availabilityRequireNoProcesses'
+] as const;
+const VIEW_ONLY_KEYS = [
+    'language', 'compactLayout', 'showUtilization', 'showTemperature', 'showPower',
+    'showFanSpeed', 'availabilityMaxMemoryMiB', 'availabilityMaxUtilization',
+    'memoryWarningThreshold', 'temperatureWarningThreshold', 'powerWarningThreshold'
+] as const;
+
+function getUiLanguage(): UiLanguage {
+    const configured = vscode.workspace
+        .getConfiguration('gpu-fleet-viewer')
+        .get<string>('language', 'auto');
+    if (configured === 'zh-CN' || configured === 'en') {
+        return configured;
+    }
+    return vscode.env.language.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
+}
 
 export class GpuViewPanel {
     private static readonly panels = new Set<GpuViewPanel>();
+    private static readonly snapshotCache = new Map<string, ServerStatus>();
     private readonly panel: vscode.WebviewPanel;
     private readonly host: string | undefined;
     private readonly monitor = new GpuMonitor();
@@ -51,10 +73,12 @@ export class GpuViewPanel {
     private readonly duplicateAliases = new Map<string, string>();
     private readonly lastSlurmQueryAt = new Map<string, number>();
     private readonly cachedSlurmByProcess = new Map<string, Map<string, NonNullable<FleetGpuInfo['processes'][number]['slurm']>>>();
-    private timer: NodeJS.Timeout | undefined;
-    private isUpdating = false;
+    private autoRefreshTimer: NodeJS.Timeout | undefined;
+    private refreshPromise: Promise<void> | undefined;
+    private refreshQueued = false;
     private disposed = false;
     private lastData: ServerStatus[] = [];
+    private lastCompletedAt = 0;
     private lastNotificationAt = 0;
 
     private constructor(
@@ -73,12 +97,9 @@ export class GpuViewPanel {
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
         this.panel.webview.onDidReceiveMessage(message => void this.handleMessage(message), null, this.disposables);
         this.disposables.push(vscode.workspace.onDidChangeConfiguration(event => {
-            if (event.affectsConfiguration('gpu-fleet-viewer')) {
-                this.setupAutoRefresh();
-                void this.update();
-            }
+            void this.handleConfigurationChange(event);
         }));
-        this.setupAutoRefresh();
+        this.scheduleAutoRefresh();
     }
 
     public static createOrShow(
@@ -90,7 +111,7 @@ export class GpuViewPanel {
         const existing = Array.from(GpuViewPanel.panels).find(candidate => candidate.host === host);
         if (existing) {
             existing.panel.reveal(column);
-            void existing.update();
+            void existing.showCachedAndRefreshIfStale();
             return;
         }
         const panel = vscode.window.createWebviewPanel(
@@ -108,7 +129,7 @@ export class GpuViewPanel {
 
     public static refreshAll(): void {
         for (const panel of GpuViewPanel.panels) {
-            void panel.update();
+            void panel.requestRefresh(true);
         }
     }
 
@@ -148,8 +169,8 @@ export class GpuViewPanel {
         }
         this.disposed = true;
         GpuViewPanel.panels.delete(this);
-        if (this.timer) {
-            clearInterval(this.timer);
+        if (this.autoRefreshTimer) {
+            clearTimeout(this.autoRefreshTimer);
         }
         while (this.disposables.length) {
             this.disposables.pop()?.dispose();
@@ -163,8 +184,10 @@ export class GpuViewPanel {
         const payload = message as Record<string, unknown>;
         switch (payload.command) {
             case 'refresh':
+                await this.requestRefresh(true);
+                break;
             case 'ready':
-                await this.update();
+                await this.showCachedAndRefreshIfStale(true);
                 break;
             case 'connect':
                 if (this.validHost(payload.host)) {
@@ -173,6 +196,13 @@ export class GpuViewPanel {
                 break;
             case 'settings':
                 await vscode.commands.executeCommand('gpu-fleet-viewer.openSettings');
+                break;
+            case 'setLanguage':
+                if (payload.language === 'en' || payload.language === 'zh-CN') {
+                    await vscode.workspace
+                        .getConfiguration('gpu-fleet-viewer')
+                        .update('language', payload.language, vscode.ConfigurationTarget.Global);
+                }
                 break;
             case 'copyValue':
                 await this.copyRequestedValue(payload);
@@ -195,150 +225,311 @@ export class GpuViewPanel {
         }
     }
 
-    private setupAutoRefresh(): void {
-        if (this.timer) {
-            clearInterval(this.timer);
-            this.timer = undefined;
+    private affectsAny(event: vscode.ConfigurationChangeEvent, keys: readonly string[]): boolean {
+        return keys.some(key => event.affectsConfiguration(`gpu-fleet-viewer.${key}`));
+    }
+
+    private async handleConfigurationChange(event: vscode.ConfigurationChangeEvent): Promise<void> {
+        if (this.affectsAny(event, AUTO_REFRESH_KEYS)) {
+            this.scheduleAutoRefresh();
         }
-        const config = vscode.workspace.getConfiguration('gpu-fleet-viewer');
-        if (config.get<boolean>('autoRefresh', true)) {
-            const interval = Math.max(2, config.get<number>('refreshInterval', 5));
-            this.timer = setInterval(() => {
-                const pauseWhenHidden = config.get<boolean>('pauseWhenHidden', true);
-                if (!pauseWhenHidden || this.panel.visible) {
-                    void this.update();
-                }
-            }, interval * 1000);
+        if (this.affectsAny(event, DATA_REFRESH_KEYS)) {
+            await this.requestRefresh(false);
+            return;
+        }
+        if (this.affectsAny(event, VIEW_ONLY_KEYS)) {
+            await this.publishCurrent();
         }
     }
 
-    private async update(): Promise<void> {
-        if (this.isUpdating || this.disposed) {
+    private clearAutoRefreshTimer(): void {
+        if (this.autoRefreshTimer) {
+            clearTimeout(this.autoRefreshTimer);
+            this.autoRefreshTimer = undefined;
+        }
+    }
+
+    private scheduleAutoRefresh(): void {
+        this.clearAutoRefreshTimer();
+        if (this.disposed) {
             return;
         }
-        this.isUpdating = true;
-        await this.panel.webview.postMessage({ type: 'loading' });
-        try {
-            const config = vscode.workspace.getConfiguration('gpu-fleet-viewer');
-            const settings = this.readViewSettings();
-            const hosts = this.host ? [{ host: this.host }] : GpuServerProvider.getHosts();
-            const hostNames = hosts.map(item => item.host);
-            const timeoutSeconds = config.get<number>('sshTimeout', 8);
-            const maxConcurrent = Math.max(1, Math.min(32, config.get<number>('maxConcurrentHosts', 8)));
-            const metadata = this.context.globalState.get<Record<string, ServerMetadata>>(METADATA_KEY, {});
-            const queryHosts = hostNames.filter(host => {
-                const primary = this.duplicateAliases.get(host);
-                return !primary || !hostNames.includes(primary);
-            });
-            const collected = await this.mapWithConcurrency(queryHosts, maxConcurrent, async host => {
-                const startedAt = Date.now();
-                try {
-                    const slurmEnabled = config.get<boolean>('enableSlurmIntegration', true);
-                    const slurmInterval = Math.max(5, config.get<number>('slurmRefreshInterval', 30)) * 1000;
-                    const shouldQuerySlurm = slurmEnabled && settings.showProcesses &&
-                        Date.now() - (this.lastSlurmQueryAt.get(host) || 0) >= slurmInterval;
-                    const snapshot = await this.monitor.getServerSnapshot(host, {
-                        timeoutSeconds,
-                        includeProcessOwners: settings.showProcesses,
-                        includeProcesses: settings.showProcesses || settings.availabilityRequireNoProcesses,
-                        includeHostHealth: settings.showHostHealth,
-                        includeSlurm: shouldQuerySlurm
-                    });
-                    if (shouldQuerySlurm) {
-                        this.lastSlurmQueryAt.set(host, Date.now());
-                        if (snapshot.slurmAvailable) {
-                            const jobs = new Map<string, NonNullable<FleetGpuInfo['processes'][number]['slurm']>>();
-                            snapshot.gpus.flatMap(gpu => gpu.processes).forEach(process => {
-                                if (process.slurm) jobs.set(process.pid, process.slurm);
-                            });
-                            this.cachedSlurmByProcess.set(host, jobs);
-                        } else {
-                            this.cachedSlurmByProcess.delete(host);
-                        }
-                    } else {
-                        const jobs = this.cachedSlurmByProcess.get(host);
-                        if (jobs) {
-                            snapshot.gpus.flatMap(gpu => gpu.processes).forEach(process => {
-                                process.slurm = jobs.get(process.pid);
-                            });
-                        }
-                    }
-                    const status: ServerStatus = {
-                        host,
-                        gpus: decorateGpus(snapshot.gpus, settings),
-                        health: snapshot.health,
-                        collectedAt: snapshot.collectedAt,
-                        latencyMs: snapshot.latencyMs,
-                        lastSuccessAt: snapshot.collectedAt,
-                        stale: false,
-                        metadata: metadata[host],
-                        slurmAvailable: snapshot.slurmAvailable || this.cachedSlurmByProcess.has(host),
-                        healthAvailable: snapshot.healthAvailable
-                    };
-                    this.lastSuccessful.set(host, status);
-                    return status;
-                } catch (error) {
-                    const friendly = this.friendlyError(error);
-                    const previous = this.lastSuccessful.get(host);
-                    let fallbackHealth = previous?.health;
-                    if (settings.showHostHealth) {
-                        try {
-                            fallbackHealth = await this.monitor.getHostHealth(host, Math.min(timeoutSeconds, 5));
-                        } catch {
-                            // The primary categorized error is more useful than a secondary health-probe error.
-                        }
-                    }
-                    return {
-                        host,
-                        gpus: previous?.gpus || [],
-                        health: fallbackHealth,
-                        collectedAt: Date.now(),
-                        latencyMs: Date.now() - startedAt,
-                        lastSuccessAt: previous?.lastSuccessAt,
-                        stale: Boolean(previous),
-                        metadata: metadata[host],
-                        slurmAvailable: previous?.slurmAvailable,
-                        healthAvailable: Boolean(fallbackHealth),
-                        error: friendly.message,
-                        errorCategory: friendly.category
-                    } as ServerStatus;
-                }
-            });
-            for (const alias of hostNames.filter(host => !queryHosts.includes(host))) {
-                const primaryHost = this.duplicateAliases.get(alias);
-                const primary = collected.find(server => server.host === primaryHost);
-                if (primary && !primary.error) {
-                    collected.push({
-                        ...primary,
-                        host: alias,
-                        metadata: metadata[alias],
-                        duplicateOf: primary.host
-                    });
-                } else {
-                    this.duplicateAliases.delete(alias);
-                }
-            }
-            this.lastData = markDuplicateServers(collected).sort((left, right) => {
-                const favorite = Number(Boolean(right.metadata?.favorite)) - Number(Boolean(left.metadata?.favorite));
-                return favorite || (left.metadata?.group || '').localeCompare(right.metadata?.group || '');
-            });
-            for (const server of this.lastData) {
-                if (server.duplicateOf) this.duplicateAliases.set(server.host, server.duplicateOf);
-            }
-            const summary = summarizeFleet(this.lastData, settings);
-            this.onStatusUpdate?.(summary);
-            this.notifyTransitions(this.lastData, settings);
-            await this.panel.webview.postMessage({
-                type: 'update',
-                title: this.host ? `GPU: ${this.host}` : 'Research GPU Fleet',
-                data: this.lastData,
-                users: settings.showProcesses ? aggregateUsers(this.lastData) : [],
-                settings,
-                summary
-            });
-        } finally {
-            this.isUpdating = false;
+        const config = vscode.workspace.getConfiguration('gpu-fleet-viewer');
+        if (!config.get<boolean>('autoRefresh', true)) {
+            return;
         }
+        const interval = Math.max(2, config.get<number>('refreshInterval', 5));
+        this.autoRefreshTimer = setTimeout(() => {
+            this.autoRefreshTimer = undefined;
+            const latest = vscode.workspace.getConfiguration('gpu-fleet-viewer');
+            if (latest.get<boolean>('pauseWhenHidden', true) && !this.panel.visible) {
+                this.scheduleAutoRefresh();
+                return;
+            }
+            void this.requestRefresh(false);
+        }, interval * 1000);
+    }
+
+    private async showCachedAndRefreshIfStale(force = false): Promise<void> {
+        await this.publishCurrent();
+        const interval = Math.max(2, vscode.workspace
+            .getConfiguration('gpu-fleet-viewer')
+            .get<number>('refreshInterval', 5)) * 1000;
+        if (force || !this.lastCompletedAt || Date.now() - this.lastCompletedAt >= interval) {
+            await this.requestRefresh(false);
+        }
+    }
+
+    private async requestRefresh(queueIfBusy: boolean): Promise<void> {
+        if (this.disposed) {
+            return;
+        }
+        if (this.refreshPromise) {
+            if (queueIfBusy) {
+                this.refreshQueued = true;
+                await this.panel.webview.postMessage({
+                    type: 'refreshState',
+                    state: 'queued',
+                    language: getUiLanguage()
+                });
+            }
+            return this.refreshPromise;
+        }
+
+        this.clearAutoRefreshTimer();
+        const run = async () => {
+            do {
+                this.refreshQueued = false;
+                await this.refreshOnce();
+            } while (this.refreshQueued && !this.disposed);
+        };
+        const promise = run().finally(() => {
+            if (this.refreshPromise === promise) {
+                this.refreshPromise = undefined;
+            }
+            this.scheduleAutoRefresh();
+        });
+        this.refreshPromise = promise;
+        await promise;
+    }
+
+    private async refreshOnce(): Promise<void> {
+        const config = vscode.workspace.getConfiguration('gpu-fleet-viewer');
+        const settings = this.readViewSettings();
+        const hosts = this.host ? [{ host: this.host }] : GpuServerProvider.getHosts();
+        const hostNames = hosts.map(item => item.host);
+        const maxConcurrent = Math.max(1, Math.min(32, config.get<number>('maxConcurrentHosts', 8)));
+        const metadata = this.context.globalState.get<Record<string, ServerMetadata>>(METADATA_KEY, {});
+        const queryHosts = hostNames.filter(host => {
+            const primary = this.duplicateAliases.get(host);
+            return !primary || !hostNames.includes(primary);
+        });
+        const results = new Map<string, ServerStatus>();
+        const current = new Map(this.lastData.map(server => [server.host, server]));
+        for (const host of hostNames) {
+            const cached = current.get(host) || GpuViewPanel.snapshotCache.get(host);
+            if (cached) {
+                results.set(host, cached);
+            }
+        }
+
+        const total = queryHosts.length;
+        if (results.size) {
+            await this.publishResults(results, hostNames, metadata, settings, true, 0, total, false);
+        } else {
+            await this.panel.webview.postMessage({
+                type: 'refreshState', state: 'refreshing', completed: 0, total, language: getUiLanguage()
+            });
+        }
+
+        let lastPublishedAt = 0;
+        await this.mapWithConcurrency(
+            queryHosts,
+            maxConcurrent,
+            host => this.queryHost(host, config, settings, metadata),
+            async (status, _index, completed) => {
+                results.set(status.host, status);
+                const now = Date.now();
+                if (completed === 1 || completed === total || now - lastPublishedAt >= 120) {
+                    lastPublishedAt = now;
+                    await this.publishResults(results, hostNames, metadata, settings, true, completed, total, false);
+                } else {
+                    await this.panel.webview.postMessage({
+                        type: 'refreshState', state: 'refreshing', completed, total, language: getUiLanguage()
+                    });
+                }
+            }
+        );
+
+        this.lastCompletedAt = Date.now();
+        await this.publishResults(results, hostNames, metadata, settings, false, total, total, true);
+    }
+
+    private async queryHost(
+        host: string,
+        config: vscode.WorkspaceConfiguration,
+        settings: ViewSettings,
+        metadata: Record<string, ServerMetadata>
+    ): Promise<ServerStatus> {
+        const startedAt = Date.now();
+        const timeoutSeconds = config.get<number>('sshTimeout', 8);
+        try {
+            const slurmEnabled = config.get<boolean>('enableSlurmIntegration', true);
+            const slurmInterval = Math.max(5, config.get<number>('slurmRefreshInterval', 30)) * 1000;
+            const shouldQuerySlurm = slurmEnabled && settings.showProcesses &&
+                Date.now() - (this.lastSlurmQueryAt.get(host) || 0) >= slurmInterval;
+            const snapshot = await this.monitor.getServerSnapshot(host, {
+                timeoutSeconds,
+                includeProcessOwners: settings.showProcesses,
+                includeProcesses: settings.showProcesses || settings.availabilityRequireNoProcesses,
+                includeHostHealth: settings.showHostHealth,
+                includeSlurm: shouldQuerySlurm
+            });
+            if (shouldQuerySlurm) {
+                this.lastSlurmQueryAt.set(host, Date.now());
+                if (snapshot.slurmAvailable) {
+                    const jobs = new Map<string, NonNullable<FleetGpuInfo['processes'][number]['slurm']>>();
+                    snapshot.gpus.flatMap(gpu => gpu.processes).forEach(process => {
+                        if (process.slurm) jobs.set(process.pid, process.slurm);
+                    });
+                    this.cachedSlurmByProcess.set(host, jobs);
+                } else {
+                    this.cachedSlurmByProcess.delete(host);
+                }
+            } else {
+                const jobs = this.cachedSlurmByProcess.get(host);
+                if (jobs) {
+                    snapshot.gpus.flatMap(gpu => gpu.processes).forEach(process => {
+                        process.slurm = jobs.get(process.pid);
+                    });
+                }
+            }
+            const status: ServerStatus = {
+                host,
+                gpus: decorateGpus(snapshot.gpus, settings),
+                health: snapshot.health,
+                collectedAt: snapshot.collectedAt,
+                latencyMs: snapshot.latencyMs,
+                lastSuccessAt: snapshot.collectedAt,
+                stale: false,
+                metadata: metadata[host],
+                slurmAvailable: snapshot.slurmAvailable || this.cachedSlurmByProcess.has(host),
+                healthAvailable: snapshot.healthAvailable
+            };
+            this.lastSuccessful.set(host, status);
+            GpuViewPanel.snapshotCache.set(host, status);
+            return status;
+        } catch (error) {
+            const friendly = this.friendlyError(error);
+            const previous = this.lastSuccessful.get(host) || GpuViewPanel.snapshotCache.get(host);
+            return {
+                host,
+                gpus: previous?.gpus || [],
+                health: previous?.health,
+                collectedAt: Date.now(),
+                latencyMs: Date.now() - startedAt,
+                lastSuccessAt: previous?.lastSuccessAt,
+                stale: Boolean(previous),
+                metadata: metadata[host],
+                slurmAvailable: previous?.slurmAvailable,
+                healthAvailable: Boolean(previous?.health),
+                error: friendly.message,
+                errorCategory: friendly.category
+            };
+        }
+    }
+
+    private composeData(
+        results: Map<string, ServerStatus>,
+        hostNames: string[],
+        metadata: Record<string, ServerMetadata>,
+        settings: ViewSettings
+    ): ServerStatus[] {
+        const collected: ServerStatus[] = [];
+        for (const host of hostNames) {
+            const primaryHost = this.duplicateAliases.get(host);
+            const status = primaryHost && hostNames.includes(primaryHost)
+                ? results.get(primaryHost) || results.get(host)
+                : results.get(host);
+            if (!status) {
+                continue;
+            }
+            collected.push({
+                ...status,
+                host,
+                gpus: decorateGpus(status.gpus, settings),
+                metadata: metadata[host],
+                duplicateOf: primaryHost && primaryHost !== host ? primaryHost : status.duplicateOf
+            });
+        }
+        const data = markDuplicateServers(collected).sort((left, right) => {
+            const favorite = Number(Boolean(right.metadata?.favorite)) - Number(Boolean(left.metadata?.favorite));
+            return favorite || (left.metadata?.group || '').localeCompare(right.metadata?.group || '');
+        });
+        for (const server of data) {
+            if (server.duplicateOf) {
+                this.duplicateAliases.set(server.host, server.duplicateOf);
+            }
+        }
+        return data;
+    }
+
+    private async publishResults(
+        results: Map<string, ServerStatus>,
+        hostNames: string[],
+        metadata: Record<string, ServerMetadata>,
+        settings: ViewSettings,
+        refreshing: boolean,
+        completed: number,
+        total: number,
+        notify: boolean
+    ): Promise<void> {
+        this.lastData = this.composeData(results, hostNames, metadata, settings);
+        await this.postUpdate(settings, refreshing, completed, total, notify);
+    }
+
+    private async publishCurrent(): Promise<void> {
+        const settings = this.readViewSettings();
+        const hostNames = (this.host ? [{ host: this.host }] : GpuServerProvider.getHosts()).map(item => item.host);
+        const metadata = this.context.globalState.get<Record<string, ServerMetadata>>(METADATA_KEY, {});
+        const results = new Map(this.lastData.map(server => [server.host, server]));
+        for (const host of hostNames) {
+            const cached = GpuViewPanel.snapshotCache.get(host);
+            if (!results.has(host) && cached) {
+                results.set(host, cached);
+            }
+        }
+        if (!results.size) {
+            return;
+        }
+        this.lastData = this.composeData(results, hostNames, metadata, settings);
+        await this.postUpdate(settings, Boolean(this.refreshPromise), 0, hostNames.length, false);
+    }
+
+    private async postUpdate(
+        settings: ViewSettings,
+        refreshing: boolean,
+        completed: number,
+        total: number,
+        notify: boolean
+    ): Promise<void> {
+        const summary = summarizeFleet(this.lastData, settings);
+        const language = getUiLanguage();
+        this.onStatusUpdate?.(summary);
+        if (notify) {
+            this.notifyTransitions(this.lastData, settings);
+        }
+        this.panel.title = this.host ? `GPU: ${this.host}` : getDashboardTranslation(language, 'panelTitle');
+        await this.panel.webview.postMessage({
+            type: 'update',
+            title: this.host ? `GPU: ${this.host}` : getDashboardTranslation(language, 'dashboardTitle'),
+            language,
+            data: this.lastData,
+            users: settings.showProcesses ? aggregateUsers(this.lastData) : [],
+            settings,
+            summary,
+            refresh: { active: refreshing, completed, total }
+        });
     }
 
     private readViewSettings(): ViewSettings {
@@ -445,7 +636,7 @@ export class GpuViewPanel {
         const metadata = this.context.globalState.get<Record<string, ServerMetadata>>(METADATA_KEY, {});
         metadata[host] = { ...metadata[host], favorite: !metadata[host]?.favorite };
         await this.context.globalState.update(METADATA_KEY, metadata);
-        await this.update();
+        await this.publishCurrent();
     }
 
     private async editServer(host: string): Promise<void> {
@@ -472,7 +663,7 @@ export class GpuViewPanel {
             group: group.trim() || undefined
         };
         await this.context.globalState.update(METADATA_KEY, metadata);
-        await this.update();
+        await this.publishCurrent();
     }
 
     private friendlyError(error: unknown): { message: string; category: ServerErrorCategory } {
@@ -509,14 +700,18 @@ export class GpuViewPanel {
     private async mapWithConcurrency<T, R>(
         values: T[],
         concurrency: number,
-        mapper: (value: T) => Promise<R>
+        mapper: (value: T) => Promise<R>,
+        onResult?: (result: R, index: number, completed: number) => Promise<void> | void
     ): Promise<R[]> {
         const results = new Array<R>(values.length);
         let nextIndex = 0;
+        let completed = 0;
         const worker = async () => {
             while (nextIndex < values.length) {
                 const index = nextIndex++;
                 results[index] = await mapper(values[index]);
+                completed += 1;
+                await onResult?.(results[index], index, completed);
             }
         };
         await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, () => worker()));
@@ -536,26 +731,27 @@ export class GpuViewPanel {
         </head>
         <body>
             <header class="toolbar">
-                <div><h1 id="page-title">Research GPU Fleet</h1><span id="refresh-state" class="subtle">Waiting for data…</span></div>
+                <div><h1 id="page-title"></h1><span id="refresh-state" class="subtle"></span></div>
                 <div class="toolbar-actions">
-                    <button id="settings-button" class="secondary-button">Settings</button>
-                    <button id="refresh-button">Refresh</button>
+                    <button id="language-button" class="secondary-button"></button>
+                    <button id="settings-button" class="secondary-button"></button>
+                    <button id="refresh-button"></button>
                 </div>
             </header>
             <section id="summary" class="summary-strip" aria-label="GPU summary"></section>
             <section class="fleet-controls" aria-label="Fleet filters">
                 <input id="search-input" type="search" placeholder="Search servers, GPUs, users, commands, or Slurm jobs">
                 <select id="status-filter" aria-label="Status filter">
-                    <option value="all">All GPUs</option><option value="available">Available</option>
-                    <option value="busy">Busy</option><option value="warning">Warning</option><option value="offline">Offline</option>
+                    <option value="all"></option><option value="available"></option>
+                    <option value="busy"></option><option value="warning"></option><option value="offline"></option>
                 </select>
                 <select id="sort-select" aria-label="Sort GPUs">
-                    <option value="configured">Configured order</option><option value="freeMemory">Most free memory</option>
-                    <option value="utilization">Lowest utilization</option><option value="temperature">Lowest temperature</option>
+                    <option value="configured"></option><option value="freeMemory"></option>
+                    <option value="utilization"></option><option value="temperature"></option>
                 </select>
             </section>
             <section id="user-filters" class="user-filters" aria-label="Active users"></section>
-            <main id="content" aria-live="polite"><div class="empty-state">Loading servers…</div></main>
+            <main id="content" aria-live="polite"><div class="empty-state"></div></main>
             <script nonce="${nonce}">${getDashboardScript()}</script>
         </body>
         </html>`;

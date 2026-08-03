@@ -4,6 +4,7 @@ import { GpuStatusSummary, GpuViewPanel } from './gpuView';
 import { SshConfigParser } from './sshConfig';
 
 const configurationKeys = [
+    'language',
     'sshConfigPath',
     'targets',
     'additionalHosts',

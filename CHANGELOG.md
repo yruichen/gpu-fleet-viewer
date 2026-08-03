@@ -2,6 +2,16 @@
 
 All notable changes to GPU Fleet Viewer are documented here.
 
+## 1.2.0 - 2026-08-03
+
+- Added persistent English and Simplified Chinese dashboard switching with independently managed locale files and locale parity checks.
+- Reworked refresh scheduling to keep cached data visible, publish host results progressively, coalesce repeated requests, and wait until a refresh completes before scheduling the next automatic cycle.
+- Prevented visual, language, threshold, favorite, and server-metadata changes from triggering unnecessary SSH queries.
+- Added session-level snapshot reuse and removed the redundant health retry after a failed snapshot query.
+- Added visual utilization meters for fleet summaries, GPU metrics, host memory, and disk usage while retaining exact numeric values.
+- Moved unreachable servers into a collapsed, neutral unavailable-server section that expands for offline filtering and matching searches.
+- Added tag-driven GitHub Actions automation for Marketplace publishing, VSIX artifacts, and GitHub Releases.
+
 ## 1.1.0 - 2026-08-01
 
 - Reframed the dashboard around the daily research workflow: find a GPU, understand its owner and job, and enter a prepared SSH environment.
