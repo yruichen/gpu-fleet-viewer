@@ -63,7 +63,7 @@ jobs:
         run: npx vsce package --out "${{ steps.version.outputs.vsix }}"
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: gpu-fleet-viewer-${{ steps.version.outputs.version }}
           path: ${{ steps.version.outputs.vsix }}
