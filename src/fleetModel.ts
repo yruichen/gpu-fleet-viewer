@@ -25,6 +25,7 @@ export interface ServerMetadata {
 }
 
 export interface ServerStatus {
+    hiddenGpuCount?: number;
     host: string;
     gpus: FleetGpuInfo[];
     health?: HostHealth;

@@ -2,7 +2,7 @@ export interface PreferenceField {
     key: string;
     group: string;
     label: [string, string];
-    type: 'boolean' | 'number' | 'string' | 'hosts' | 'enum';
+    type: 'boolean' | 'number' | 'string' | 'hosts' | 'enum' | 'events' | 'gpus';
     default: unknown;
     min?: number;
     max?: number;
@@ -12,6 +12,9 @@ export interface PreferenceField {
 export const preferenceFields: PreferenceField[] = [
     { key: 'sshConfigPath', group: 'servers', label: ['SSH config file', 'SSH 配置文件'], type: 'string', default: '~/.ssh/config' },
     { key: 'additionalHosts', group: 'servers', label: ['Additional SSH hosts (one per line)', '额外 SSH 主机（每行一个）'], type: 'hosts', default: [] },
+    { key: 'targets', group: 'servers', label: ['Monitored SSH aliases (empty = all)', '监控的 SSH 别名（留空表示全部）'], type: 'hosts', default: [] },
+    { key: 'ignoredHosts', group: 'servers', label: ['Excluded SSH aliases', '排除的 SSH 别名'], type: 'hosts', default: [] },
+    { key: 'visibleGpus', group: 'servers', label: ['Visible GPUs per server', '各服务器显示的 GPU'], type: 'gpus', default: {} },
     { key: 'researchUser', group: 'servers', label: ['My remote username', '我的远程用户名'], type: 'string', default: '' },
     { key: 'language', group: 'display', label: ['Language', '语言'], type: 'enum', options: ['auto', 'en', 'zh-CN'], default: 'auto' },
     { key: 'autoRefresh', group: 'refresh', label: ['Automatic refresh', '自动刷新'], type: 'boolean', default: true },
@@ -35,6 +38,7 @@ export const preferenceFields: PreferenceField[] = [
     { key: 'enableSlurmIntegration', group: 'display', label: ['Detect Slurm jobs', '识别 Slurm 作业'], type: 'boolean', default: true },
     { key: 'slurmRefreshInterval', group: 'refresh', label: ['Slurm refresh interval (seconds)', 'Slurm 刷新间隔（秒）'], type: 'number', min: 5, max: 300, default: 30 },
     { key: 'enableNotifications', group: 'notifications', label: ['Notify on availability, offline servers, and warnings', '通知 GPU 释放、服务器上下线和阈值告警'], type: 'boolean', default: false },
+    { key: 'notificationEvents', group: 'notifications', label: ['Notification events', '通知事件'], type: 'events', options: ['serverState','gpuAvailable','threshold'], default: ['serverState','gpuAvailable','threshold'] },
     { key: 'notificationCooldownSeconds', group: 'notifications', label: ['Notification cooldown (seconds)', '通知冷却时间（秒）'], type: 'number', min: 0, max: 3600, default: 60 },
     { key: 'memoryWarningThreshold', group: 'notifications', label: ['Memory warning (%)', '显存警告阈值（%）'], type: 'number', min: 1, max: 100, default: 85 },
     { key: 'temperatureWarningThreshold', group: 'notifications', label: ['Temperature warning (°C)', '温度警告阈值（°C）'], type: 'number', min: 1, max: 120, default: 80 },
@@ -58,6 +62,9 @@ export function validatePreferenceChanges(input: unknown): Record<string, unknow
         if (field.type === 'string') valid = typeof value === 'string' && value.length <= 2048 && !/[\r\n\0]/.test(value);
         if (field.type === 'hosts') valid = Array.isArray(value) && value.length <= 500 &&
             value.every(host => typeof host === 'string' && !host.startsWith('-') && /^[A-Za-z0-9_.:@-]+$/.test(host));
+        if (field.type === 'events') valid = Array.isArray(value) && value.every(event => field.options?.includes(event));
+        if (field.type === 'gpus') valid = Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.entries(value).length <= 500 &&
+            Object.entries(value).every(([host, ids]) => !['__proto__','constructor','prototype'].includes(host) && !host.startsWith('-') && /^[A-Za-z0-9_.:@-]+$/.test(host) && Array.isArray(ids) && ids.length <= 128 && ids.every(id => typeof id === 'string' && /^(?:\d{1,4}|GPU-[\w-]+)$/.test(id)));
         if (!valid) throw new Error(`Invalid setting: ${key}`);
         if (key === 'ai.baseUrl') {
             try {

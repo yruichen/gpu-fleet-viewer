@@ -18,6 +18,8 @@ import { preferenceFields, validatePreferenceChanges } from './preferences';
 import { getPreferencesHtml } from './preferencesView';
 import { getAssistantHtml } from './assistantView';
 import { AiController } from './aiController';
+import { TaskService, visibleFleet } from './taskService';
+import { sshConfigArguments } from './sshConfig';
 
 export { GpuStatusSummary } from './fleetModel';
 
@@ -147,8 +149,8 @@ export class GpuViewPanel {
             await vscode.window.showInformationMessage('Open GPU Fleet and wait for the first refresh.');
             return;
         }
-        const candidates = panel.lastData
-            .filter(server => !server.error && !server.duplicateOf)
+        const candidates = visibleFleet(panel.lastData, vscode.workspace.getConfiguration('gpu-fleet-viewer').get<Record<string,string[]>>('visibleGpus',{}))
+            .filter(server => !server.error && !server.stale && !server.duplicateOf)
             .flatMap(server => server.gpus
                 .filter(gpu => gpu.availability.available)
                 .map(gpu => ({ server, gpu })))
@@ -430,14 +432,14 @@ export class GpuViewPanel {
             const shouldQuerySlurm = slurmEnabled && settings.showProcesses &&
                 Date.now() - (this.lastSlurmQueryAt.get(host) || 0) >= slurmInterval;
             const includeOwners = settings.showProcesses || Boolean(config.get<string>('researchUser', ''));
-            const snapshot = await this.monitor.getServerSnapshot(host, {
+            const snapshot = await TaskService.get(this.context).snapshot(host, {
                 sshConfigPath: config.get<string>('sshConfigPath'),
                 timeoutSeconds,
                 includeProcessOwners: includeOwners,
                 includeProcesses: includeOwners || settings.availabilityRequireNoProcesses,
                 includeHostHealth: settings.showHostHealth,
                 includeSlurm: shouldQuerySlurm
-            });
+            }, 0, this.monitor);
             if (shouldQuerySlurm) {
                 this.lastSlurmQueryAt.set(host, Date.now());
                 if (snapshot.slurmAvailable) {
@@ -571,23 +573,25 @@ export class GpuViewPanel {
         total: number,
         notify: boolean
     ): Promise<void> {
-        const summary = summarizeFleet(this.lastData, settings);
         const language = getUiLanguage();
         const config = vscode.workspace.getConfiguration('gpu-fleet-viewer');
+        const visible = visibleFleet(this.lastData, config.get<Record<string,string[]>>('visibleGpus',{}));
+        const summary = summarizeFleet(visible, settings);
         const revision = ++this.publication;
         const aiConfigured = await this.assistant.isConfigured();
         if (this.disposed || revision !== this.publication) return;
         this.onStatusUpdate?.(summary);
         if (notify) {
-            this.notifyTransitions(this.lastData, settings);
+            this.notifyTransitions(visible, settings);
         }
         this.panel.title = this.host ? `GPU: ${this.host}` : getDashboardTranslation(language, 'panelTitle');
         await this.panel.webview.postMessage({
             type: 'update',
             title: this.host ? `GPU: ${this.host}` : getDashboardTranslation(language, 'dashboardTitle'),
             language,
-            data: this.lastData,
-            users: settings.showProcesses ? aggregateUsers(this.lastData) : [],
+            data: visible,
+            gpuCatalog: this.lastData.map(server => ({host:server.host,label:server.metadata?.alias||server.host,gpus:server.gpus.map(g=>({index:g.index,uuid:g.uuid,name:g.name}))})),
+            users: settings.showProcesses ? aggregateUsers(visible) : [],
             settings,
             preferences: Object.fromEntries(preferenceFields.map(field => [field.key, config.get(field.key, field.default)])),
             aiConfigured,
@@ -667,7 +671,9 @@ export class GpuViewPanel {
         }
         const terminal = vscode.window.createTerminal({ name: `GPU ${host}` });
         terminal.show();
-        const command = `ssh -t ${host} 'export CUDA_DEVICE_ORDER=PCI_BUS_ID; export CUDA_VISIBLE_DEVICES=${uuid}; exec "$SHELL" -l'`;
+        const quote = (value:string) => "'" + value.replace(/'/g,"'\\''") + "'";
+        const configArgs = sshConfigArguments(vscode.workspace.getConfiguration('gpu-fleet-viewer').get<string>('sshConfigPath'));
+        const command = `ssh ${configArgs.map(quote).join(' ')} -t ${host} 'export CUDA_DEVICE_ORDER=PCI_BUS_ID; export CUDA_VISIBLE_DEVICES=${uuid}; exec "$SHELL" -l'`;
         terminal.sendText(command, false);
     }
 

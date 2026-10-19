@@ -37,6 +37,10 @@ export function getDashboardScript(): string {
         let language = 'en';
         let refreshStatus = { state: 'idle', completed: 0, total: 0 };
         let visibleGpuCount = 0;
+        const selectedTasks = new Map();
+        const taskEvidence = new Map();
+        const taskProgress = new Map();
+        const taskText = (en, zh) => language === 'zh-CN' ? zh : en;
 
         const translations = ${JSON.stringify(dashboardTranslations)};
         const icons = ${JSON.stringify(lineIcons)};
@@ -447,48 +451,58 @@ export function getDashboardScript(): string {
         }
 
         function renderInspector(server, gpu) {
-            const inspector = node('section', 'process-inspector');
-            inspector.dataset.key = 'inspector:' + gpu.uuid;
-            const header = node('header', 'inspector-header');
-            const title = node('div');
-            title.append(node('strong', '', (server.metadata && server.metadata.alias || server.host) + ' · GPU ' + gpu.index),
-                node('span', 'subtle block', gpu.name + ' · ' + gpu.uuid));
-            header.append(title, button(t('close'), 'secondary-button compact-button', () => {
-                selectedGpuKey = undefined;
-                renderFleet();
-            }));
-            inspector.append(header);
-            if (!gpu.processes.length) {
-                inspector.append(node('div', 'inspector-empty', t('noProcesses')));
-                return inspector;
+            const key=server.host+':'+gpu.uuid;
+            const inspector=node('section','process-inspector');inspector.dataset.key='inspector:'+gpu.uuid;
+            const header=node('header','inspector-header');
+            const title=node('div');title.append(node('strong','',(server.metadata?.alias||server.host)+' · GPU '+gpu.index),node('span','subtle block',gpu.name+' · '+gpu.memory.used+' / '+gpu.memory.total+' · '+gpu.utilization.gpu));
+            header.append(title,button(t('close'),'secondary-button compact-button',()=>{selectedGpuKey=undefined;renderFleet();}));inspector.append(header);
+            const actions=node('div','task-primary-actions');
+            const ask=(process)=>window.dispatchEvent(new CustomEvent('openAssistant',{detail:{host:server.host,uuid:gpu.uuid,pid:process?.pid,question:process?taskText('Identify this GPU task and inspect its launcher and progress.','查一下这个 GPU 任务的训练入口和进度。'):taskText('What is running on this GPU?','这张 GPU 在运行什么任务？')}}));
+            actions.append(button(taskText('Ask AI','问 AI'),'secondary-button compact-button',()=>ask(selectedTasks.get(key))),button(taskText('Notify when free','释放时提醒我'),'secondary-button compact-button',()=>{vscode.postMessage({command:'watchGpu',host:server.host,uuid:gpu.uuid});window.dispatchEvent(new CustomEvent('openAssistant',{detail:{host:server.host,uuid:gpu.uuid}}));}));inspector.append(actions);
+            if(!gpu.processes.length&&!selectedTasks.has(key)){inspector.append(node('p','subtle',t('noProcesses')));return inspector;}
+            const layout=node('div','task-inspector-layout');
+            const list=node('div','process-scroll task-list');list.setAttribute('role','group');list.setAttribute('aria-label',taskText('GPU processes','GPU 进程'));
+            if(!selectedTasks.has(key)&&gpu.processes.length)selectedTasks.set(key,{...gpu.processes[0]});
+            const selected=selectedTasks.get(key);
+            for(const process of gpu.processes){
+                const row=button('','task-row',()=>{selectedTasks.set(key,{...process});renderFleet();});row.dataset.key=process.pid+':'+(process.startIdentity||'');row.setAttribute('aria-pressed',String(selected?.pid===process.pid&&(!selected.startIdentity||selected.startIdentity===process.startIdentity)));
+                const command=process.command||process.name;
+                row.append(node('strong','task-owner',process.user+' · PID '+process.pid),node('span','task-entrypoint',command),node('span','subtle',formatDuration(process.elapsedSeconds)+' · '+process.usedMemory));row.title=command;list.append(row);
             }
-            const scroll = node('div', 'process-scroll');
-            const table = node('table', 'process-table');
-            const head = node('thead');
-            const headRow = node('tr');
-            [t('command'), t('user'), 'PID', t('runtime'), t('gpuMemory'), 'Slurm', t('copy')].forEach(label => headRow.append(node('th', '', label)));
-            head.append(headRow);
-            const body = node('tbody');
-            for (const process of gpu.processes) {
-                const row = node('tr');
-                row.dataset.key = process.pid;
-                const command = node('td', 'command-cell', process.command || process.name);
-                command.title = process.command || process.name;
-                const slurm = process.slurm ? process.slurm.id + ' · ' + process.slurm.name + ' · ' + process.slurm.state : '—';
-                const actions = node('td', 'copy-actions');
-                actions.append(
-                    button('PID', 'table-button', () => vscode.postMessage({ command: 'copyValue', kind: 'pid', host: server.host, uuid: gpu.uuid, pid: process.pid })),
-                    button(t('cmd'), 'table-button', () => vscode.postMessage({ command: 'copyValue', kind: 'command', host: server.host, uuid: gpu.uuid, pid: process.pid }))
-                );
-                row.append(command, node('td', '', process.user), node('td', '', process.pid),
-                    node('td', '', formatDuration(process.elapsedSeconds)), node('td', 'numeric', process.usedMemory),
-                    node('td', 'slurm-cell', slurm), actions);
-                body.append(row);
+            const details=node('section','task-details');details.dataset.key='selected-task';
+            if(selected){
+                const live=gpu.processes.find(p=>p.pid===selected.pid&&(selected.startIdentity?p.startIdentity===selected.startIdentity:p.elapsedSeconds>=selected.elapsedSeconds));
+                if(!live)details.append(node('p','task-ended',taskText('This selected process is no longer in the current sample. Exit status is unknown.','选中进程已不在本次采样中；退出状态未知。')));
+                const process=live||selected;
+                details.append(node('strong','',process.user+' · PID '+process.pid),node('span','subtle block',taskText('Runtime: ','已运行：')+formatDuration(process.elapsedSeconds)+' · '+taskText('GPU memory: ','GPU 显存：')+process.usedMemory));
+                if(process.slurm)details.append(node('p','subtle','Slurm '+process.slurm.id+' · '+process.slurm.name+' · '+process.slurm.state));
+                details.append(node('pre','task-command',process.command||process.name));
+                const controls=node('div','dialog-actions');
+                controls.append(button(taskText('Trace task source','查询任务来源'),'secondary-button compact-button',()=>{taskEvidence.set(key+':'+process.pid,{loading:true});vscode.postMessage({command:'inspectTask',host:server.host,uuid:gpu.uuid,pid:process.pid});renderFleet();}),button(t('cmd'),'secondary-button compact-button',()=>vscode.postMessage({command:'copyAiText',text:process.command||process.name})),button('PID','secondary-button compact-button',()=>vscode.postMessage({command:'copyAiText',text:process.pid})),button(taskText('Ask AI about task','问 AI 分析任务'),'secondary-button compact-button',()=>ask(process)));
+                controls.firstElementChild.disabled=!live;inspector.append(node('span','subtle task-sample-time',taskText('GPU sample: ','GPU 采样：')+new Date(server.lastSuccessAt||server.collectedAt).toLocaleTimeString()));details.append(controls);
+                const evidence=taskEvidence.get(key+':'+process.pid);
+                if(evidence){
+                    if(evidence.loading)details.append(node('p','subtle',taskText('Tracing parent processes…','正在追查父进程…')));
+                    else if(evidence.error)details.append(node('p','task-ended',evidence.error));
+                    else {
+                        details.append(node('p','subtle',taskText('Task evidence: ','任务查询：')+new Date(evidence.collectedAt).toLocaleTimeString()));
+                        const chain=node('div','task-parent-chain');
+                        for(const parent of evidence.chain||[]) {const item=node('div','task-parent');item.append(node('strong','',parent.user+' · PID '+parent.pid+' → '+parent.ppid),node('code','block',parent.command),node('span','subtle block',parent.cwd||''));chain.append(item);}
+                        if(!chain.childNodes.length)chain.append(node('p','subtle',taskText('No accessible process evidence. The task may have exited or permission is missing.','没有可读取的进程信息：任务可能已退出或权限不足。')));
+                        details.append(chain);
+                        const paths=[...new Set((evidence.chain||[]).flatMap(p=>p.logs||[]))];
+                        for(const path of paths) {
+                            const log=node('div','task-parent');log.append(node('strong','',taskText('Task log','任务日志')),node('code','block',path));
+                            const progress=taskProgress.get(server.host+':'+path);
+                            if(progress?.progress){
+                                const p=progress.progress;log.append(node('span','block',p.current+'/'+p.total+' '+p.unit+(p.remainingSeconds!==undefined?' · '+taskText('Phase estimate: ','当前阶段估计剩余：')+formatDuration(p.remainingSeconds):'')),node('span','subtle block',taskText('Log updated: ','日志更新：')+new Date(progress.modifiedAt*1000).toLocaleString()));
+                            } else log.append(node('span','subtle block',taskText('Authorize and ask AI to inspect progress.','在 AI 侧栏授权后，可继续查询任务进度。')));
+                            details.append(log);
+                        }
+                    }
+                }
             }
-            table.append(head, body);
-            scroll.append(table);
-            inspector.append(scroll);
-            return inspector;
+            layout.append(list,details);inspector.append(layout);return inspector;
         }
 
         function renderHealth(server) {
@@ -558,7 +572,7 @@ export function getDashboardScript(): string {
                 const selected = settings.showProcesses && gpus.find(gpu => selectedGpuKey === server.host + ':' + gpu.uuid);
                 if (selected) band.append(renderInspector(server, selected));
             } else if (!server.error) {
-                band.append(node('div', 'empty-state compact-empty', t('noNvidia')));
+                band.append(node('div', 'empty-state compact-empty', server.hiddenGpuCount ? taskText('All GPUs are hidden in Settings → Servers.','GPU 已全部隐藏，可在设置 → 服务器中调整。') : t('noNvidia')));
             }
             return band;
         }
@@ -644,6 +658,11 @@ export function getDashboardScript(): string {
                 language = message.language === 'zh-CN' ? 'zh-CN' : 'en';
                 applyStaticLanguage();
                 showRefreshState(message.state || 'refreshing', message.completed || 0, message.total || 0);
+            } else if (message.type === 'taskProgress') {
+                taskProgress.set(message.host+':'+message.path,message);renderFleet();
+            } else if (message.type === 'taskEvidence') {
+                taskEvidence.set(message.host+':'+message.uuid+':'+message.pid,message.evidence||{error:message.error});
+                renderFleet();
             } else if (message.type === 'update') {
                 render(message);
             }
@@ -772,12 +791,20 @@ export function getDashboardCss(): string {
         .inspector-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 9px; border-bottom: 1px solid var(--vscode-widget-border); }
         .inspector-empty, .empty-state { padding: 20px; color: var(--vscode-descriptionForeground); text-align: center; }
         .process-scroll { max-height: 260px; overflow: auto; }
-        .process-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 10px; }
-        .process-table th, .process-table td { overflow: hidden; padding: 5px 7px; border-bottom: 1px solid var(--vscode-widget-border); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-        .process-table th { position: sticky; top: 0; z-index: 1; color: var(--vscode-descriptionForeground); background: var(--vscode-editor-background); font-size: 9px; text-transform: uppercase; }
-        .process-table th:first-child { width: 34%; }
-        .process-table th:nth-child(6) { width: 18%; }
-        .process-table th:last-child { width: 82px; }
+        .task-primary-actions { display:flex; gap:6px; padding:8px 12px; border-bottom:1px solid var(--vscode-widget-border); }
+        .task-inspector-layout { display:grid; grid-template-columns:minmax(180px,30%) minmax(0,1fr); }
+        .task-list { padding:6px; border-right:1px solid var(--vscode-widget-border); max-height:360px; overflow:auto; }
+        .task-row { display:grid; width:100%; gap:4px; text-align:left; padding:9px 10px; border-radius:4px; color:var(--vscode-foreground); background:transparent; font-size:11px; }
+        .task-row[aria-pressed="true"] { background:var(--vscode-list-inactiveSelectionBackground); outline:1px solid var(--vscode-focusBorder); outline-offset:-1px; }
+        .task-entrypoint { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--vscode-editor-font-family); }
+        .task-details { padding:12px; min-width:0; max-height:420px; overflow:auto; font-size:12px; }
+        .task-command { white-space:pre-wrap; overflow-wrap:anywhere; padding:10px; background:var(--vscode-textCodeBlock-background); font-size:11px; line-height:1.6; user-select:text; }
+        .task-parent { padding:8px 0; border-top:1px solid var(--vscode-widget-border); overflow-wrap:anywhere; }
+        .task-parent code { white-space:pre-wrap; font-size:11px; margin:5px 0; }
+        .task-ended { color:var(--vscode-editorWarning-foreground); }
+        .task-sample-time { display:block; padding:6px 12px; }
+        @media(max-width:680px) { .task-inspector-layout { grid-template-columns:1fr; } .task-list { max-height:150px; border-right:0; border-bottom:1px solid var(--vscode-widget-border); } }
+
         .numeric { text-align: right !important; }
         .table-button { min-height: 20px; padding: 1px 5px; color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); font-size: 9px; }
         .compact-empty { padding: 12px; }
@@ -802,7 +829,6 @@ export function getDashboardCss(): string {
             .server-header { display: grid; }
             .server-actions { justify-content: flex-start; }
             .gpu-matrix, .gpu-matrix.compact[class*="gpu-count-"] { grid-template-columns: 1fr; }
-            .process-table th:first-child { width: 26%; }
         }
         @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
         ${getDialogCss()}

@@ -2,6 +2,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+export function sshConfigArguments(configPath?: string): string[] {
+    return configPath && configPath !== '~/.ssh/config'
+        ? ['-F',configPath.startsWith('~/') ? path.join(os.homedir(),configPath.slice(2)) : configPath] : [];
+}
+
 export interface SshHost {
     host: string;
     hostname?: string;

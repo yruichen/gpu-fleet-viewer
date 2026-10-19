@@ -2,6 +2,16 @@
 
 All notable changes to GPU Fleet Viewer are documented here.
 
+## 1.4.0 - 2026-10-19
+
+- Kept the dashboard and rebuilt AI as a compact chat dialog with a task/context sidebar, safe Markdown tables/code, streaming, cancellation, keyboard input and query evidence.
+- Added native OpenAI/Anthropic tool turns for fresh GPU status, parent-process tracing, bounded host diagnosis, Slurm details/accounting and explicitly authorized task-log tails.
+- Required local desktop extension execution so SSH uses the local network, SSH configuration, agent and jump hosts, including in remote workspaces.
+- Added evidence-based progress/phase ETA and explicit unknown states; no arbitrary shell, task termination, remote writes or automatic training changes.
+- Added persistent GPU release, verified task-end and scheduled reminders, independent of dashboard visibility, with deadlines and cancellation.
+- Added per-server GPU visibility settings and consistent dashboard/statistics/AI scope, individual notification events, section resets, dependent controls and unsaved-change protection.
+- Replaced the narrow process table with a selectable task list, readable commands, parent-process evidence and direct assistant/reminder actions.
+
 ## 1.3.0 - 2026-10-19
 
 - Fixed dashboard flicker and jumping by preserving server, GPU, and process DOM nodes, keyboard focus, and inspector scroll during progressive refreshes.

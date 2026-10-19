@@ -24,16 +24,17 @@ A fast, privacy-friendly research workstation for finding, understanding, and us
 - Available-GPU count in the VS Code status bar.
 - Resource filters for minimum free memory per GPU and matching GPU count per server, plus a **My tasks** filter.
 - In-dashboard settings for servers, refresh behavior, display, availability rules, notifications, and optional AI.
-- Optional AI assistant with your own OpenAI-compatible or Anthropic endpoint, model, and securely stored key.
+- Compact AI chat with a context/reminder sidebar, Markdown, streaming, local SSH task investigation, and your own OpenAI-compatible or Anthropic endpoint.
+- Per-server GPU selection, parent-process tracing, authorized log progress, and persistent release/task-end/timed reminders.
 - Direct **Connect SSH** action for Remote - SSH users.
 - High-performance SSH snapshots, bounded concurrency, hidden-panel pausing, cached Slurm metadata, duplicate-query suppression, and overlapping-refresh protection.
 - No telemetry and no stored passwords or private keys.
 
 ## Requirements
 
-- VS Code 1.80 or newer.
+- Desktop VS Code 1.80 or newer, with the extension installed **locally**. Local SSH is not available in browser-only VS Code.
 - `ssh` available on the computer running VS Code.
-- `nvidia-smi` installed on each monitored server.
+- `nvidia-smi` installed on each monitored server. Advanced task inspection requires Linux `/proc` and `python3` on the SSH host; basic GPU monitoring does not.
 - Non-interactive SSH authentication, normally an SSH key and `BatchMode=yes` compatibility.
 - Optional: [Remote - SSH](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-ssh) for the **Connect SSH** button.
 
@@ -48,7 +49,7 @@ code --install-extension yruichen.gpu-fleet-viewer
 For offline installation, download the latest `.vsix` from [GitHub Releases](https://github.com/yruichen/gpu-fleet-viewer/releases/latest), then run:
 
 ```bash
-code --install-extension gpu-fleet-viewer-1.1.0.vsix
+code --install-extension gpu-fleet-viewer-1.4.0.vsix
 ```
 
 Reload VS Code and open **GPU Fleet** from the Activity Bar.
@@ -79,10 +80,11 @@ When Slurm is installed, the extension detects it automatically and associates l
 
 Open **Settings** in the dashboard for common options, or search for `GPU Fleet Viewer` in VS Code Settings. Set **My remote username** to enable **My tasks**. Resource filters combine with search, status, and user filters; available memory is a snapshot and does not guarantee that a workload will fit.
 
-Settings are saved explicitly. Background refreshes preserve your unsaved edits, selected GPU, filters, keyboard focus, and process-table scroll. The dashboard opens when requested; activating the extension no longer replaces your current editor.
+Settings are saved explicitly. **Servers → Visible GPUs per server** lets you select individual cards; omitting a server selects all its cards, including future additions. Scope applies to dashboard statistics, available-GPU selection and default AI context. Existing reminders continue monitoring hidden cards. Background refreshes preserve unsaved edits, selected GPU, filters, keyboard focus, and inspector scroll. Closing settings with unsaved changes offers save or discard; resetting a section changes the draft until saved. The dashboard opens when requested; activating the extension no longer replaces your current editor.
 
 | Setting | Default | Purpose |
 | --- | ---: | --- |
+| `gpu-fleet-viewer.visibleGpus` | `{}` | Map SSH aliases to GPU indices or UUIDs; omitted alias = all, empty list = none |
 | `gpu-fleet-viewer.language` | `auto` | Follow VS Code or use English/简体中文; the dashboard toolbar also switches instantly |
 | `gpu-fleet-viewer.autoRefresh` | `true` | Refresh automatically |
 | `gpu-fleet-viewer.refreshInterval` | `5` | Refresh interval in seconds |
@@ -115,9 +117,23 @@ Target lists, ignored hosts, SSH config path, and warning thresholds are also co
 
 1. Open dashboard **Settings → AI**, choose the protocol, enter your provider's API URL and model ID, and save.
 2. Select **Set / replace key**. VS Code prompts for the key using a password field and saves it in SecretStorage for that protocol and endpoint. It is never stored in `settings.json` or passed to the Webview.
-3. Open **AI assistant** and enter a question. To ask about your servers, enable **Attach fleet snapshot** and inspect the exact context before sending. Full process commands require a separate checkbox.
+3. Open **AI assistant**, or select **Ask AI** in a GPU's task inspector. The dashboard remains behind a compact chat window. The sidebar shows the conversation scope, data time, authorized logs, query evidence, and reminders.
 
-Requests happen only when you select **Send**. Your configured provider receives the question, the current conversation, and any context you attach. Changing providers clears the conversation; changing endpoints uses a separate saved key. **Clear chat** removes the in-memory conversation. The assistant can be cancelled and cannot execute commands or manage jobs. Use HTTPS for remote API services; HTTP transmits data without encryption.
+The current visible fleet summary is included automatically when you send a question. The assistant can combine bounded local SSH queries to trace workers to their launcher, inspect Slurm queue/accounting, compare resources and read explicitly authorized task logs. Each tool operation appears in the sidebar. No SSH private keys or API keys are sent to the model. Full commands and authorized log excerpts may contain private experimental data; only authorize files you permit your configured provider to receive. Common credential fields are masked, but masking is not comprehensive data anonymization.
+
+For example: **“What is running on GPU 6 and 7?” → “Check the parent process and its progress” → “Notify me when this task ends.”** If a log needs authorization, select its exact path in the sidebar, then send a follow-up. You can also authorize a known absolute path for the selected server. Revoke permissions from the same sidebar.
+
+Completion estimates need logged progress and an observed speed; they describe the current phase and may exclude validation/checkpoint saving. Slurm time limits are shown as scheduling constraints. Utilization or runtime alone does not provide a reliable ETA. Missing permissions, container visibility, unavailable tools and unknown outcomes are reported rather than inferred as success.
+
+GPU Fleet uses the **local desktop** SSH executable and local SSH configuration, including your port, agent and ProxyJump, even in a Remote SSH or container window. Install it under **Local** in VS Code; a remote-only installation must be moved locally. The AI service does not connect to your machines. It cannot run arbitrary shell, stop jobs, edit training parameters, install packages or delete files. Suggested commands are prepared for review, never auto-run.
+
+AI requests occur only when you send a question or follow-up. Your configured provider receives the question, conversation and relevant evidence. Automatic dashboard refresh and reminders never call AI. Keys remain endpoint-scoped in SecretStorage. **Clear chat** removes the in-memory conversation. Use HTTPS for remote API services; HTTP transmits data without encryption. Streaming and native tool calling depend on your provider/model; unsupported protocols produce a visible error or plain-chat fallback.
+
+### Reminders
+
+Ask for GPU release, verified task end, or a scheduled check. Conditions and absolute deadlines are shown in the sidebar, where you can edit the deadline or cancel. Release reminders require two successful free samples at least 30 seconds apart; unknown/offline snapshots do not count. Unspecified deadlines default to 24 hours. A worker exit alone does not prove an entire experiment completed.
+
+Reminders persist locally and run while **desktop VS Code is running and the machine is awake**, independently of the chat or dashboard panel. They poll only relevant configured servers every 30 seconds, coalescing recent queries. They do not reserve GPUs or guarantee a notified card stays free. After restart or sleep, overdue valid scheduled checks report once; expired conditions are marked expired.
 
 ## Security and privacy
 

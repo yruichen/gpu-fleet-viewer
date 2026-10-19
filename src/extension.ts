@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { GpuServerProvider } from './serverProvider';
 import { GpuStatusSummary, GpuViewPanel } from './gpuView';
 import { SshConfigParser } from './sshConfig';
+import { TaskService } from './taskService';
 
 const configurationKeys = [
     'language',
@@ -50,6 +51,7 @@ async function migrateLegacySettings(): Promise<void> {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     await migrateLegacySettings();
+    TaskService.get(context);
     const serverProvider = new GpuServerProvider();
     const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     statusBar.command = 'gpu-fleet-viewer.openDashboard';

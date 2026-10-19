@@ -1,6 +1,6 @@
 const assert = require('assert');
 const http = require('http');
-const { aiEndpoint, aiSecretKey, askAi, buildFleetContext } = require('../out/aiClient');
+const { aiEndpoint, aiSecretKey, askAi, aiTurn, buildFleetContext } = require('../out/aiClient');
 const { validatePreferenceChanges } = require('../out/preferences');
 
 async function main() {
@@ -44,6 +44,19 @@ async function main() {
                 res.end(JSON.stringify({ error: { message: 'secret-dummy-must-not-leak' } }));
             } else if (req.url.includes('slow')) {
                 // The client must cancel an actual in-flight request.
+            } else if (req.url.includes('stream')) {
+                res.setHeader('Content-Type','text/event-stream');
+                const frames = req.url.includes('messages') ? [
+                    {type:'content_block_start',index:0,content_block:{type:'tool_use',id:'t1',name:'inspect_task',input:{}}},
+                    {type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:'{"server":"host-a","pid":"42"}'}},
+                    {type:'message_stop'}
+                ] : [
+                    {choices:[{delta:{content:'**GPU** ',tool_calls:[{index:0,id:'t1',function:{name:'inspect_task',arguments:'{"server":'}}]}}]},
+                    {choices:[{delta:{content:'ready',tool_calls:[{index:0,function:{arguments:'"host-a","pid":"42"}'}}]}}]}
+                ];
+                const wire=frames.map(frame=>'data: '+JSON.stringify(frame)+'\n\n').join('')+'data: [DONE]\n\n';
+                for(let i=0;i<wire.length;i+=7) res.write(wire.slice(i,i+7));
+                res.end();
             } else if (req.url.includes('messages')) {
                 res.end(JSON.stringify({ content: [{ type: 'text', text: 'Claude answer' }] }));
             } else {
@@ -65,6 +78,20 @@ async function main() {
         assert.strictEqual(requests[1].headers['anthropic-version'], '2023-06-01');
         assert.strictEqual(requests[1].body.messages[0].role, 'user');
         assert.ok(typeof requests[1].body.system === 'string');
+        for(const protocol of ['openai','anthropic']) {
+            const deltas=[];
+            const turn=await aiTurn({...options,protocol,baseUrl:baseUrl+'/stream'},[
+                {role:'user',content:'查任务'},
+                {role:'assistant',content:'',toolCalls:[{id:'earlier',name:'get_fleet_status',arguments:{}}]},
+                {role:'tool',content:'fleet result',toolCallId:'earlier'}
+            ],'current context',[{name:'inspect_task',description:'Inspect a task',parameters:{type:'object',properties:{}}}],undefined,delta=>deltas.push(delta));
+            assert.deepStrictEqual(turn.toolCalls,[{id:'t1',name:'inspect_task',arguments:{server:'host-a',pid:'42'}}]);
+            if(protocol==='openai') assert.strictEqual(deltas.join(''),'**GPU** ready');
+            const body=requests.at(-1).body;
+            assert.ok(body.tools.length);
+            if(protocol==='anthropic') assert.strictEqual(body.messages.at(-1).content[0].type,'tool_result');
+            else assert.strictEqual(body.messages.at(-1).tool_call_id,'earlier');
+        }
         await assert.rejects(askAi({ ...options, baseUrl: baseUrl + '/fail' }, [{ role: 'user', content: 'Help' }], ''), error => /401/.test(error.message) && !/secret-dummy/.test(error.message));
         const controller = new AbortController();
         const pending = askAi({ ...options, baseUrl: baseUrl + '/slow' }, [{ role: 'user', content: 'Help' }], '', controller.signal);

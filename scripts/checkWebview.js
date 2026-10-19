@@ -41,12 +41,12 @@ async function main() {
     dom.window.document.querySelectorAll('.server-band')[2].querySelectorAll('.gpu-main')[1].click();
     const selectedBand = dom.window.document.querySelectorAll('.server-band')[2];
     assert.strictEqual(selectedBand.querySelectorAll('.process-inspector').length, 1);
-    assert.strictEqual(selectedBand.querySelectorAll('.process-table tbody tr').length, 7);
+    assert.strictEqual(selectedBand.querySelectorAll('.task-row').length, 7);
     const focusedGpu = selectedBand.querySelectorAll('.gpu-main')[1];
     focusedGpu.focus();
     const processScroll = selectedBand.querySelector('.process-scroll');
     processScroll.scrollTop = 80;
-    const processRow = selectedBand.querySelector('.process-table tbody tr');
+    const processRow = selectedBand.querySelector('.task-row');
     dom.window.__gpuPreview.data[2].gpus[1].processes[0].elapsedSeconds = 18500;
     dom.window.postMessage(dom.window.__gpuPreview, '*');
     await new Promise(resolve => setTimeout(resolve, 10));
@@ -54,7 +54,7 @@ async function main() {
     assert.strictEqual(dom.window.document.activeElement, focusedGpu, 'Refreshing must retain keyboard focus.');
     assert.strictEqual(selectedBand.querySelector('.process-scroll'), processScroll);
     assert.strictEqual(processScroll.scrollTop, 80, 'Refreshing must retain inspector scroll position.');
-    assert.strictEqual(selectedBand.querySelector('.process-table tbody tr'), processRow);
+    assert.strictEqual(selectedBand.querySelector('.task-row'), processRow);
     selectedBand.querySelector('.inspector-header button').click();
     assert.strictEqual(dom.window.document.querySelectorAll('.process-inspector').length, 0);
 
@@ -99,6 +99,17 @@ async function main() {
     dom.window.document.getElementById('settings-button').click();
     const preferences = dom.window.document.getElementById('preferences-dialog');
     assert.strictEqual(preferences.open, true);
+    const gpuScope=dom.window.document.getElementById('pref-visibleGpus');
+    assert.ok(gpuScope.querySelectorAll('.gpu-scope-card').length>=4);
+    const firstCard=gpuScope.querySelector('.gpu-scope-card');
+    const firstGpu=firstCard.querySelector('.gpu-scope-choices input');
+    firstGpu.checked=false;firstGpu.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+    dom.window.document.getElementById('preferences-close').click();
+    assert.strictEqual(preferences.open,true,'Unsaved scope edits must not be silently discarded.');
+    assert.strictEqual(dom.window.document.getElementById('preferences-discard').hidden,false);
+    dom.window.document.getElementById('preferences-discard').click();
+    assert.strictEqual(preferences.open,false);
+    dom.window.document.getElementById('settings-button').click();
     const interval = dom.window.document.getElementById('pref-refreshInterval');
     interval.value = '12';
     interval.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
@@ -117,10 +128,20 @@ async function main() {
     const assistant = dom.window.document.getElementById('assistant-dialog');
     assert.strictEqual(assistant.open, true);
     assert.strictEqual(dom.window.__gpuMessages.filter(message => message.command === 'askAi').length, 0);
-    dom.window.postMessage({ type: 'aiResult', answer: '<img src=x onerror=alert(1)>Plain answer' }, '*');
+    assert.ok(assistant.querySelector('.assistant-sidebar'));
+    assert.strictEqual(assistant.querySelectorAll('input[type=checkbox]').length,0);
+    assert.ok(dom.window.document.querySelector('.server-band'), 'Opening chat must retain the dashboard.');
+    const { renderMarkdown } = require('../out/markdown');
+    const markdown='<img src=x onerror=alert(1)>\n\n**GPU ready**\n\n| GPU | Free |\n| --- | --- |\n| 0 | yes |\n\n```sh\nnvidia-smi\n```\n\n[x](command:danger) [docs](https://example.com)';
+    dom.window.postMessage({ type: 'aiResult', answer: markdown, html:renderMarkdown(markdown) }, '*');
     await new Promise(resolve => setTimeout(resolve, 10));
-    assert.strictEqual(assistant.querySelectorAll('.chat-text img').length, 0, 'Model output must stay plain text.');
+    assert.strictEqual(assistant.querySelectorAll('.chat-text img').length, 0, 'Raw model HTML must not execute.');
     assert.ok(assistant.querySelector('.chat-text').textContent.includes('<img'));
+    assert.strictEqual(assistant.querySelector('.chat-text strong').textContent,'GPU ready');
+    assert.strictEqual(assistant.querySelectorAll('.chat-text table').length,1);
+    assert.strictEqual(assistant.querySelectorAll('.chat-text pre code').length,1);
+    assert.strictEqual(assistant.querySelectorAll('a[href^="command:"]').length,0);
+    assert.ok(assistant.querySelector('.code-copy'));
     dom.window.document.getElementById('assistant-close').click();
 
     dom.window.__gpuPreview.data.push({
