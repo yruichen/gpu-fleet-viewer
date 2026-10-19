@@ -14,6 +14,10 @@ import {
     summarizeFleet
 } from './fleetModel';
 import { getDashboardCss, getDashboardScript, getDashboardTranslation } from './webviewTemplate';
+import { preferenceFields, validatePreferenceChanges } from './preferences';
+import { getPreferencesHtml } from './preferencesView';
+import { getAssistantHtml } from './assistantView';
+import { AiController } from './aiController';
 
 export { GpuStatusSummary } from './fleetModel';
 
@@ -39,14 +43,9 @@ const METADATA_KEY = 'gpu-fleet-viewer.serverMetadata';
 const AUTO_REFRESH_KEYS = ['autoRefresh', 'refreshInterval', 'pauseWhenHidden'] as const;
 const DATA_REFRESH_KEYS = [
     'sshConfigPath', 'targets', 'additionalHosts', 'ignoredHosts', 'showProcesses',
-    'showHostHealth', 'availabilityRequireNoProcesses'
+    'showHostHealth', 'availabilityRequireNoProcesses', 'sshTimeout', 'maxConcurrentHosts',
+    'enableSlurmIntegration', 'slurmRefreshInterval', 'researchUser'
 ] as const;
-const VIEW_ONLY_KEYS = [
-    'language', 'compactLayout', 'showUtilization', 'showTemperature', 'showPower',
-    'showFanSpeed', 'availabilityMaxMemoryMiB', 'availabilityMaxUtilization',
-    'memoryWarningThreshold', 'temperatureWarningThreshold', 'powerWarningThreshold'
-] as const;
-
 function getUiLanguage(): UiLanguage {
     const configured = vscode.workspace
         .getConfiguration('gpu-fleet-viewer')
@@ -80,6 +79,9 @@ export class GpuViewPanel {
     private lastData: ServerStatus[] = [];
     private lastCompletedAt = 0;
     private lastNotificationAt = 0;
+    private readonly assistant: AiController;
+    private savingPreferences = false;
+    private publication = 0;
 
     private constructor(
         panel: vscode.WebviewPanel,
@@ -91,10 +93,16 @@ export class GpuViewPanel {
         this.context = context;
         this.host = host;
         this.onStatusUpdate = onStatusUpdate;
+        this.assistant = new AiController(context, panel.webview, () => this.lastData, () => this.publishCurrent());
+        this.disposables.push(this.assistant);
         GpuViewPanel.panels.add(this);
         this.panel.webview.html = this.getWebviewContent();
 
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+        this.panel.onDidChangeViewState(event => {
+            if (event.webviewPanel.visible) void this.showCachedAndRefreshIfStale();
+            else if (vscode.workspace.getConfiguration('gpu-fleet-viewer').get<boolean>('pauseWhenHidden', true)) this.clearAutoRefreshTimer();
+        }, null, this.disposables);
         this.panel.webview.onDidReceiveMessage(message => void this.handleMessage(message), null, this.disposables);
         this.disposables.push(vscode.workspace.onDidChangeConfiguration(event => {
             void this.handleConfigurationChange(event);
@@ -182,12 +190,14 @@ export class GpuViewPanel {
             return;
         }
         const payload = message as Record<string, unknown>;
+        if (await this.assistant.handle(payload)) return;
         switch (payload.command) {
             case 'refresh':
                 await this.requestRefresh(true);
                 break;
             case 'ready':
-                await this.showCachedAndRefreshIfStale(true);
+                this.assistant.reset();
+                await this.showCachedAndRefreshIfStale();
                 break;
             case 'connect':
                 if (this.validHost(payload.host)) {
@@ -195,7 +205,17 @@ export class GpuViewPanel {
                 }
                 break;
             case 'settings':
+            case 'openNativeSettings':
                 await vscode.commands.executeCommand('gpu-fleet-viewer.openSettings');
+                break;
+            case 'configureServers':
+                await vscode.commands.executeCommand('gpu-fleet-viewer.configureServers');
+                break;
+            case 'addServer':
+                await vscode.commands.executeCommand('gpu-fleet-viewer.addServer');
+                break;
+            case 'savePreferences':
+                await this.savePreferences(payload.values);
                 break;
             case 'setLanguage':
                 if (payload.language === 'en' || payload.language === 'zh-CN') {
@@ -230,15 +250,48 @@ export class GpuViewPanel {
     }
 
     private async handleConfigurationChange(event: vscode.ConfigurationChangeEvent): Promise<void> {
+        if (this.savingPreferences) return;
+        if (event.affectsConfiguration('gpu-fleet-viewer.ai')) this.assistant.reset();
         if (this.affectsAny(event, AUTO_REFRESH_KEYS)) {
             this.scheduleAutoRefresh();
         }
         if (this.affectsAny(event, DATA_REFRESH_KEYS)) {
-            await this.requestRefresh(false);
+            if (event.affectsConfiguration('gpu-fleet-viewer.sshConfigPath')) {
+                this.duplicateAliases.clear();
+                this.lastSuccessful.clear();
+                GpuViewPanel.snapshotCache.clear();
+            }
+            await this.requestRefresh(true);
             return;
         }
-        if (this.affectsAny(event, VIEW_ONLY_KEYS)) {
+        if (event.affectsConfiguration('gpu-fleet-viewer')) {
             await this.publishCurrent();
+        }
+    }
+
+    private async savePreferences(input: unknown): Promise<void> {
+        if (this.savingPreferences) return;
+        try {
+            const changes = validatePreferenceChanges(input);
+            const config = vscode.workspace.getConfiguration('gpu-fleet-viewer');
+            const entries = Object.entries(changes).filter(([key, value]) => JSON.stringify(config.get(key)) !== JSON.stringify(value));
+            this.savingPreferences = true;
+            try {
+                for (const [key, value] of entries) await config.update(key, value, vscode.ConfigurationTarget.Global);
+            } finally { this.savingPreferences = false; }
+            if (entries.some(([key]) => key.startsWith('ai.'))) this.assistant.reset();
+            if (entries.some(([key]) => key === 'sshConfigPath')) {
+                this.duplicateAliases.clear(); this.lastSuccessful.clear(); GpuViewPanel.snapshotCache.clear();
+            }
+            await this.panel.webview.postMessage({ type: 'preferencesResult', success: true, values: changes });
+            if (entries.some(([key]) => (DATA_REFRESH_KEYS as readonly string[]).includes(key))) {
+                await this.requestRefresh(true);
+            } else {
+                this.scheduleAutoRefresh();
+                await this.publishCurrent();
+            }
+        } catch (error) {
+            await this.panel.webview.postMessage({ type: 'preferencesResult', success: false, error: (error as Error).message });
         }
     }
 
@@ -251,32 +304,30 @@ export class GpuViewPanel {
 
     private scheduleAutoRefresh(): void {
         this.clearAutoRefreshTimer();
-        if (this.disposed) {
+        if (this.disposed || this.refreshPromise) {
             return;
         }
         const config = vscode.workspace.getConfiguration('gpu-fleet-viewer');
         if (!config.get<boolean>('autoRefresh', true)) {
             return;
         }
+        if (config.get<boolean>('pauseWhenHidden', true) && !this.panel.visible) return;
         const interval = Math.max(2, config.get<number>('refreshInterval', 5));
         this.autoRefreshTimer = setTimeout(() => {
             this.autoRefreshTimer = undefined;
-            const latest = vscode.workspace.getConfiguration('gpu-fleet-viewer');
-            if (latest.get<boolean>('pauseWhenHidden', true) && !this.panel.visible) {
-                this.scheduleAutoRefresh();
-                return;
-            }
             void this.requestRefresh(false);
         }, interval * 1000);
     }
 
-    private async showCachedAndRefreshIfStale(force = false): Promise<void> {
+    private async showCachedAndRefreshIfStale(): Promise<void> {
         await this.publishCurrent();
         const interval = Math.max(2, vscode.workspace
             .getConfiguration('gpu-fleet-viewer')
             .get<number>('refreshInterval', 5)) * 1000;
-        if (force || !this.lastCompletedAt || Date.now() - this.lastCompletedAt >= interval) {
+        if (!this.lastCompletedAt || Date.now() - this.lastCompletedAt >= interval) {
             await this.requestRefresh(false);
+        } else {
+            this.scheduleAutoRefresh();
         }
     }
 
@@ -378,10 +429,12 @@ export class GpuViewPanel {
             const slurmInterval = Math.max(5, config.get<number>('slurmRefreshInterval', 30)) * 1000;
             const shouldQuerySlurm = slurmEnabled && settings.showProcesses &&
                 Date.now() - (this.lastSlurmQueryAt.get(host) || 0) >= slurmInterval;
+            const includeOwners = settings.showProcesses || Boolean(config.get<string>('researchUser', ''));
             const snapshot = await this.monitor.getServerSnapshot(host, {
+                sshConfigPath: config.get<string>('sshConfigPath'),
                 timeoutSeconds,
-                includeProcessOwners: settings.showProcesses,
-                includeProcesses: settings.showProcesses || settings.availabilityRequireNoProcesses,
+                includeProcessOwners: includeOwners,
+                includeProcesses: includeOwners || settings.availabilityRequireNoProcesses,
                 includeHostHealth: settings.showHostHealth,
                 includeSlurm: shouldQuerySlurm
             });
@@ -396,13 +449,16 @@ export class GpuViewPanel {
                 } else {
                     this.cachedSlurmByProcess.delete(host);
                 }
-            } else {
+            } else if (slurmEnabled) {
                 const jobs = this.cachedSlurmByProcess.get(host);
                 if (jobs) {
                     snapshot.gpus.flatMap(gpu => gpu.processes).forEach(process => {
                         process.slurm = jobs.get(process.pid);
                     });
                 }
+            } else {
+                this.cachedSlurmByProcess.delete(host);
+                this.lastSlurmQueryAt.delete(host);
             }
             const status: ServerStatus = {
                 host,
@@ -500,6 +556,8 @@ export class GpuViewPanel {
             }
         }
         if (!results.size) {
+            this.lastData = [];
+            await this.postUpdate(settings, Boolean(this.refreshPromise), 0, hostNames.length, false);
             return;
         }
         this.lastData = this.composeData(results, hostNames, metadata, settings);
@@ -515,6 +573,10 @@ export class GpuViewPanel {
     ): Promise<void> {
         const summary = summarizeFleet(this.lastData, settings);
         const language = getUiLanguage();
+        const config = vscode.workspace.getConfiguration('gpu-fleet-viewer');
+        const revision = ++this.publication;
+        const aiConfigured = await this.assistant.isConfigured();
+        if (this.disposed || revision !== this.publication) return;
         this.onStatusUpdate?.(summary);
         if (notify) {
             this.notifyTransitions(this.lastData, settings);
@@ -527,6 +589,8 @@ export class GpuViewPanel {
             data: this.lastData,
             users: settings.showProcesses ? aggregateUsers(this.lastData) : [],
             settings,
+            preferences: Object.fromEntries(preferenceFields.map(field => [field.key, config.get(field.key, field.default)])),
+            aiConfigured,
             summary,
             refresh: { active: refreshing, completed, total }
         });
@@ -733,6 +797,7 @@ export class GpuViewPanel {
             <header class="toolbar">
                 <div><h1 id="page-title"></h1><span id="refresh-state" class="subtle"></span></div>
                 <div class="toolbar-actions">
+                    <button id="assistant-button" class="secondary-button"></button>
                     <button id="language-button" class="secondary-button"></button>
                     <button id="settings-button" class="secondary-button"></button>
                     <button id="refresh-button"></button>
@@ -750,8 +815,16 @@ export class GpuViewPanel {
                     <option value="utilization"></option><option value="temperature"></option>
                 </select>
             </section>
+            <section class="resource-controls" aria-label="Resource requirements">
+                <label><span id="min-memory-label"></span><input id="min-memory" type="number" min="0" max="1048576" step="1" value="0"><span>GiB</span></label>
+                <label><span id="min-gpus-label"></span><input id="min-gpus" type="number" min="1" max="1024" step="1" value="1"></label>
+                <button id="my-tasks-button" class="secondary-button" type="button"></button>
+                <button id="reset-filters-button" class="text-button" type="button"></button>
+            </section>
             <section id="user-filters" class="user-filters" aria-label="Active users"></section>
-            <main id="content" aria-live="polite"><div class="empty-state"></div></main>
+            <main id="content"><div class="empty-state"></div></main>
+            ${getPreferencesHtml()}
+            ${getAssistantHtml()}
             <script nonce="${nonce}">${getDashboardScript()}</script>
         </body>
         </html>`;

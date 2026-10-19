@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import childProcess = require('child_process');
 import { GpuMonitor } from '../gpuMonitor';
 import {
     aggregateUsers,
@@ -47,6 +48,26 @@ async function runTest(): Promise<void> {
         assert.strictEqual(hosts[0].host, 'test-server');
         assert.strictEqual(hosts[0].user, 'testuser');
 
+        fs.writeFileSync(configPath, [
+            'Host alpha beta',
+            '  HostName=192.0.2.10',
+            '  User "researcher" # shared account',
+            '  IdentityFile "~/.ssh/lab key"',
+            'Host *',
+            '  User fallback',
+            'Host gamma',
+            '  User gamma-user',
+            'Match host gamma',
+            '  HostName conditional.example',
+            'Host !excluded *.internal',
+            '  HostName wildcard.example'
+        ].join('\n'));
+        assert.deepStrictEqual(new SshConfigParser().parse(configPath), [
+            { host: 'alpha', hostname: '192.0.2.10', user: 'researcher', identityFile: '~/.ssh/lab key' },
+            { host: 'beta', hostname: '192.0.2.10', user: 'researcher', identityFile: '~/.ssh/lab key' },
+            { host: 'gamma', user: 'gamma-user' }
+        ], 'Host aliases must share block options; wildcard and Match blocks must not overwrite them.');
+
         const owners = new Map([['1234', 'alice']]);
         const gpus = await new GpuMonitor().parseNvidiaSmiXml(dummyXml, owners);
         assert.strictEqual(gpus.length, 1);
@@ -67,6 +88,23 @@ async function runTest(): Promise<void> {
         assert.strictEqual(queriedGpus[0].processes[0].name, '/usr/bin/python,worker');
         assert.strictEqual(queriedGpus[0].processes[0].user, 'alice');
         assert.strictEqual(queriedGpus[0].processes[0].command, '/usr/bin/python,worker');
+
+        const originalExecFile = childProcess.execFile;
+        const sshArguments: string[][] = [];
+        (childProcess as any).execFile = (file: string, args: string[], _options: unknown, callback: any) => {
+            assert.strictEqual(file, 'ssh');
+            sshArguments.push(args);
+            callback(null, queryOutput, '');
+        };
+        try {
+            const customOptions = { timeoutSeconds: 8, includeProcessOwners: false, sshConfigPath: configPath };
+            await new GpuMonitor().getServerSnapshot('alpha', customOptions);
+            const configIndex = sshArguments[0].indexOf('-F');
+            assert.ok(configIndex >= 0, 'Monitoring must use the same SSH config file as discovery.');
+            assert.strictEqual(sshArguments[0][configIndex + 1], configPath);
+        } finally {
+            childProcess.execFile = originalExecFile;
+        }
 
         const monitor = new GpuMonitor();
         const health = monitor.parseHostHealth('1.25|0.80|0.50|262144|196608|1048576|524288|86400');

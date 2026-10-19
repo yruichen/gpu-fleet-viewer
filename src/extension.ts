@@ -54,7 +54,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     statusBar.command = 'gpu-fleet-viewer.openDashboard';
     statusBar.name = 'GPU Fleet Viewer';
-    statusBar.text = '$(dashboard) GPU: loading';
+    statusBar.text = '$(dashboard) GPU Fleet';
     statusBar.tooltip = 'Open GPU Dashboard';
 
     const updateStatusBarVisibility = () => {
@@ -194,7 +194,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     );
 
     updateStatusBarVisibility();
-    openDashboard();
 }
 
 export function deactivate(): void {}

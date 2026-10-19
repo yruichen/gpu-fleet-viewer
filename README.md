@@ -22,6 +22,9 @@ A fast, privacy-friendly research workstation for finding, understanding, and us
 - Local server aliases, groups, favorites, and duplicate physical-host detection.
 - Configurable metrics, warning thresholds, notifications, refresh interval, and SSH timeout.
 - Available-GPU count in the VS Code status bar.
+- Resource filters for minimum free memory per GPU and matching GPU count per server, plus a **My tasks** filter.
+- In-dashboard settings for servers, refresh behavior, display, availability rules, notifications, and optional AI.
+- Optional AI assistant with your own OpenAI-compatible or Anthropic endpoint, model, and securely stored key.
 - Direct **Connect SSH** action for Remote - SSH users.
 - High-performance SSH snapshots, bounded concurrency, hidden-panel pausing, cached Slurm metadata, duplicate-query suppression, and overlapping-refresh protection.
 - No telemetry and no stored passwords or private keys.
@@ -74,7 +77,9 @@ When Slurm is installed, the extension detects it automatically and associates l
 
 ## Settings
 
-Search for `GPU Fleet Viewer` in VS Code Settings.
+Open **Settings** in the dashboard for common options, or search for `GPU Fleet Viewer` in VS Code Settings. Set **My remote username** to enable **My tasks**. Resource filters combine with search, status, and user filters; available memory is a snapshot and does not guarantee that a workload will fit.
+
+Settings are saved explicitly. Background refreshes preserve your unsaved edits, selected GPU, filters, keyboard focus, and process-table scroll. The dashboard opens when requested; activating the extension no longer replaces your current editor.
 
 | Setting | Default | Purpose |
 | --- | ---: | --- |
@@ -98,12 +103,25 @@ Search for `GPU Fleet Viewer` in VS Code Settings.
 | `gpu-fleet-viewer.availabilityMaxUtilization` | `10` | Maximum utilization for availability |
 | `gpu-fleet-viewer.showStatusBar` | `true` | Show fleet availability in the status bar |
 | `gpu-fleet-viewer.enableNotifications` | `false` | Notify on newly crossed warning thresholds |
+| `gpu-fleet-viewer.researchUser` | empty | Remote username used by **My tasks** |
+| `gpu-fleet-viewer.ai.protocol` | `openai` | OpenAI-compatible Chat Completions or Anthropic Messages |
+| `gpu-fleet-viewer.ai.baseUrl` | `https://api.openai.com/v1` | Custom API base URL or full endpoint |
+| `gpu-fleet-viewer.ai.model` | empty | Model ID provided by your API service |
+| `gpu-fleet-viewer.ai.timeoutSeconds` | `60` | AI response timeout |
 
 Target lists, ignored hosts, SSH config path, and warning thresholds are also configurable. Settings from the earlier `gpu-server-viewer` namespace are migrated automatically on first activation.
 
+## Optional AI assistant
+
+1. Open dashboard **Settings → AI**, choose the protocol, enter your provider's API URL and model ID, and save.
+2. Select **Set / replace key**. VS Code prompts for the key using a password field and saves it in SecretStorage for that protocol and endpoint. It is never stored in `settings.json` or passed to the Webview.
+3. Open **AI assistant** and enter a question. To ask about your servers, enable **Attach fleet snapshot** and inspect the exact context before sending. Full process commands require a separate checkbox.
+
+Requests happen only when you select **Send**. Your configured provider receives the question, the current conversation, and any context you attach. Changing providers clears the conversation; changing endpoints uses a separate saved key. **Clear chat** removes the in-memory conversation. The assistant can be cancelled and cannot execute commands or manage jobs. Use HTTPS for remote API services; HTTP transmits data without encryption.
+
 ## Security and privacy
 
-GPU Fleet Viewer invokes your system `ssh` client with argument-safe execution, key-only batch mode, and a configurable timeout. Hosts and GPU identifiers received from the Webview are validated again in the extension host. It reads your SSH config but never reads or stores private-key contents. Monitoring data stays between VS Code and the servers you configured; the extension has no telemetry service, backend, persistent metric history, or job-control endpoint.
+GPU Fleet Viewer invokes your system `ssh` client with argument-safe execution, key-only batch mode, and a configurable timeout. A custom SSH config is passed to the SSH client as well as used for host discovery. Hosts and GPU identifiers received from the Webview are validated again in the extension host. It reads your SSH config but never reads or stores private-key contents. Monitoring data stays between VS Code and your servers unless you explicitly attach a snapshot to an AI question. There is no telemetry service, persistent metric history, or job-control endpoint.
 
 Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 

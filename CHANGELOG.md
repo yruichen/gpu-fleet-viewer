@@ -2,6 +2,17 @@
 
 All notable changes to GPU Fleet Viewer are documented here.
 
+## 1.3.0 - 2026-10-19
+
+- Fixed dashboard flicker and jumping by preserving server, GPU, and process DOM nodes, keyboard focus, and inspector scroll during progressive refreshes.
+- Preserved refresh progress while filtering, stopped opening the dashboard on extension activation, and reused fresh snapshots when returning to a panel.
+- Added memory/card-count resource filters, My tasks, explicit filter reset, and retained filter/selection state across Webview reloads.
+- Added grouped in-dashboard settings with validation, explicit saves, preserved unsaved edits, and batched refreshes.
+- Refined dense layouts with neutral surfaces, semantic colors, readable metrics, and licensed Lucide line icons.
+- Added optional OpenAI-compatible and Anthropic AI question answering with endpoint-scoped SecretStorage keys, previewed opt-in context, cancellation, and in-memory conversation history.
+- Fixed shared SSH alias options, wildcard/Match block isolation, quoted/commented config values, and use of custom SSH config files for monitoring.
+- Added automatic Marketplace publication for new stable versions merged into main, with matching GitHub releases and retry support.
+
 ## 1.2.0 - 2026-08-03
 
 - Added persistent English and Simplified Chinese dashboard switching with independently managed locale files and locale parity checks.

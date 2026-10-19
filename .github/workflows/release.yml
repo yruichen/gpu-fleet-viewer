@@ -2,25 +2,45 @@ name: Marketplace Release
 
 on:
   push:
+    branches: [main]
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: marketplace-release-${{ github.ref }}
+  group: marketplace-release
   cancel-in-progress: false
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      vsix: ${{ steps.version.outputs.vsix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Resolve release version
+        id: version
+        run: bash scripts/resolveRelease.sh
+
   publish:
+    needs: version
+    if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+    permissions:
+      contents: write
 
     steps:
-      - name: Check out tagged revision
+      - name: Check out release revision
         uses: actions/checkout@v7
 
       - name: Set up Node.js
@@ -32,20 +52,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Validate release version
-        id: version
-        shell: bash
-        run: |
-          package_version=$(node -p "require('./package.json').version")
-          tag_version=${GITHUB_REF_NAME#v}
-          if [[ "$package_version" != "$tag_version" ]]; then
-            echo "Tag $GITHUB_REF_NAME does not match package version $package_version." >&2
-            exit 1
-          fi
-          echo "version=$package_version" >> "$GITHUB_OUTPUT"
-          echo "vsix=gpu-fleet-viewer-$package_version.vsix" >> "$GITHUB_OUTPUT"
-
       - name: Verify Marketplace credential
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
         shell: bash
         run: |
           if [[ -z "$VSCE_PAT" ]]; then
@@ -60,28 +69,32 @@ jobs:
         run: npm audit --omit=dev --registry=https://registry.npmjs.org
 
       - name: Package extension
-        run: npx vsce package --out "${{ steps.version.outputs.vsix }}"
+        run: npx --no-install vsce package --out "${{ needs.version.outputs.vsix }}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v6
         with:
-          name: gpu-fleet-viewer-${{ steps.version.outputs.version }}
-          path: ${{ steps.version.outputs.vsix }}
+          name: gpu-fleet-viewer-${{ needs.version.outputs.version }}
+          path: ${{ needs.version.outputs.vsix }}
           if-no-files-found: error
 
       - name: Publish to Visual Studio Marketplace
-        run: npx vsce publish --packagePath "${{ steps.version.outputs.vsix }}"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx --no-install vsce publish --packagePath "${{ needs.version.outputs.vsix }}" --skip-duplicate
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+          RELEASE_VSIX: ${{ needs.version.outputs.vsix }}
         shell: bash
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "${{ steps.version.outputs.vsix }}" --clobber
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$RELEASE_VSIX" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "${{ steps.version.outputs.vsix }}" \
-              --verify-tag \
+            gh release create "$RELEASE_TAG" "$RELEASE_VSIX" \
+              --target "$GITHUB_SHA" \
               --generate-notes \
-              --title "GPU Fleet Viewer $GITHUB_REF_NAME"
+              --title "GPU Fleet Viewer $RELEASE_TAG"
           fi

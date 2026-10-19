@@ -12,7 +12,7 @@
 	},
 	"author": "yruichen",
 	"license": "Apache-2.0",
-	"version": "1.2.0",
+	"version": "1.3.0",
 	"icon": "resources/icon.png",
 	"publisher": "yruichen",
 	"pricing": "Free",
@@ -332,6 +332,42 @@
 					"minimum": 1,
 					"maximum": 100,
 					"description": "Power limit percentage that triggers warning styling"
+				},
+				"gpu-fleet-viewer.researchUser": {
+					"type": "string",
+					"default": "",
+					"description": "Remote username used by the My tasks filter.",
+					"scope": "application"
+				},
+				"gpu-fleet-viewer.ai.protocol": {
+					"type": "string",
+					"enum": [
+						"openai",
+						"anthropic"
+					],
+					"default": "openai",
+					"description": "Custom AI API protocol. Requests occur only when you send a question.",
+					"scope": "application"
+				},
+				"gpu-fleet-viewer.ai.baseUrl": {
+					"type": "string",
+					"default": "https://api.openai.com/v1",
+					"description": "AI API base URL or full endpoint. Set the key separately using the dashboard Settings.",
+					"scope": "application"
+				},
+				"gpu-fleet-viewer.ai.model": {
+					"type": "string",
+					"default": "",
+					"description": "Model ID supplied by your AI provider.",
+					"scope": "application"
+				},
+				"gpu-fleet-viewer.ai.timeoutSeconds": {
+					"type": "number",
+					"default": 60,
+					"minimum": 5,
+					"maximum": 300,
+					"description": "Timeout for an AI response in seconds.",
+					"scope": "application"
 				}
 			}
 		}
@@ -344,7 +380,7 @@
 		"watch": "tsc -watch -p ./",
 		"pretest": "npm run compile && npm run lint",
 		"lint": "eslint src --ext ts",
-		"test": "node scripts/checkLocales.js && node ./out/test/manual_test.js && npm run preview:build && node scripts/checkWebview.js"
+		"test": "node scripts/checkLocales.js && node ./out/test/manual_test.js && node scripts/checkAi.js && node scripts/checkRelease.js && node scripts/checkRefresh.js && npm run preview:build && node scripts/checkWebview.js"
 	},
 	"devDependencies": {
 		"@types/glob": "^8.1.0",

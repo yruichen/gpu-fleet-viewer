@@ -21,7 +21,7 @@ export class SshConfigParser {
         const content = fs.readFileSync(resolvedPath, 'utf8');
         const lines = content.split('\n');
         const hosts: SshHost[] = [];
-        let currentHost: SshHost | null = null;
+        let currentHosts: SshHost[] = [];
 
         for (let line of lines) {
             line = line.trim();
@@ -29,33 +29,29 @@ export class SshConfigParser {
                 continue;
             }
 
-            const parts = line.split(/\s+/);
-            const key = parts[0].toLowerCase();
-            const value = parts.slice(1).join(' ');
+            // Keep quoted paths intact and discard comments outside quotes.
+            const parts = line.match(/"[^"\n]*"|'[^'\n]*'|[^\s=#]+|#[^\n]*/g) || [];
+            const tokens = parts.filter(part => !part.startsWith('#'))
+                .map(part => part.replace(/^(["'])(.*)\1$/, '$2'));
+            const key = tokens[0]?.toLowerCase();
+            const value = tokens.slice(1).join(' ');
 
             if (key === 'host') {
-                // Support multiple patterns? For now just take the first one if multiple are listed, or create multiple entries?
-                // Spec says "list of servers". Usually "Host *" is not a server.
-                // Let's skip wildcards for now or handle them carefully.
-                // "Host web01 web02" -> creates two entries?
-                // For simplicity, let's assume one host per Host line or handle the first one.
-                // Actually, standard ssh config allows multiple patterns.
-                // Let's iterate over patterns.
-                const patterns = parts.slice(1);
-                for (const pattern of patterns) {
-                    if (pattern.includes('*') || pattern.includes('?')) {
-                        continue; // Skip wildcards
+                currentHosts = tokens.slice(1)
+                    .filter(pattern => !/[*!?]/.test(pattern))
+                    .map(host => ({ host }));
+                hosts.push(...currentHosts);
+            } else if (key === 'match') {
+                currentHosts = [];
+            } else {
+                for (const currentHost of currentHosts) {
+                    if (key === 'hostname' && currentHost.hostname === undefined) {
+                        currentHost.hostname = value;
+                    } else if (key === 'user' && currentHost.user === undefined) {
+                        currentHost.user = value;
+                    } else if (key === 'identityfile' && currentHost.identityFile === undefined) {
+                        currentHost.identityFile = value;
                     }
-                    currentHost = { host: pattern };
-                    hosts.push(currentHost);
-                }
-            } else if (currentHost) {
-                if (key === 'hostname') {
-                    currentHost.hostname = value;
-                } else if (key === 'user') {
-                    currentHost.user = value;
-                } else if (key === 'identityfile') {
-                    currentHost.identityFile = value;
                 }
             }
         }
