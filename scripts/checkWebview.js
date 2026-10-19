@@ -24,8 +24,21 @@ async function main() {
     assert.ok(dom.window.document.querySelectorAll('.host-health').length >= 4);
     assert.match(dom.window.document.getElementById('refresh-state').textContent, /^Updated /);
 
-    dom.window.document.getElementById('language-button').click();
+    assert.strictEqual(dom.window.document.getElementById('language-button'),null,'Language belongs in settings, not the main toolbar.');
+    dom.window.document.getElementById('settings-button').click();
+    const languagePreference=dom.window.document.getElementById('pref-language');
+    languagePreference.value='zh-CN';languagePreference.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+    dom.window.document.getElementById('preferences-form').dispatchEvent(new dom.window.Event('submit',{cancelable:true}));
     await new Promise(resolve => setTimeout(resolve, 10));
+    dom.window.document.getElementById('preferences-close').click();
+    assert.strictEqual(dom.window.document.getElementById('page-title').textContent,'GPU Fleet');
+    assert.strictEqual(dom.window.document.querySelectorAll('.summary-meter').length,3,'Only continuous resource metrics need progress tracks.');
+    assert.strictEqual(dom.window.document.querySelectorAll('.user-chip.active').length,1,'Unselected users must not share the selected state.');
+    dom.window.document.querySelector('.summary-filter[data-filter=available]').click();
+    assert.strictEqual(dom.window.document.getElementById('status-filter').value,'available');
+    assert.strictEqual(dom.window.document.getElementById('reset-filters-button').hidden,false);
+    dom.window.document.getElementById('reset-filters-button').click();
+    assert.strictEqual(dom.window.document.getElementById('reset-filters-button').hidden,true);
     assert.strictEqual(dom.window.document.getElementById('settings-button').textContent, '设置');
     assert.strictEqual(dom.window.document.querySelector('#status-filter option[value="available"]').textContent, '可用');
     assert.match(dom.window.document.getElementById('refresh-state').textContent, /^更新于 /);
@@ -165,6 +178,9 @@ async function main() {
     dom.window.postMessage({type:'aiActivity',id:'model-0',phase:'waiting',state:'running',startedAt:Date.now()-12000,endpoint:'api.example.test'},'*');
     await new Promise(resolve=>setTimeout(resolve,10));
     const waiting=assistant.querySelector('.chat-activity .assistant-step[data-state=running]:last-child');
+    assert.strictEqual(waiting.closest('.activity-group').open,true,'An active investigation must show its actual operations.');
+    assert.ok(assistant.querySelector('.chat-entry.user .chat-role .icon'));
+    assert.ok(waiting.closest('.chat-entry.assistant').querySelector('.chat-role .icon'));
     assert.ok(waiting.closest('.assistant-messages'),'Activity must be in the conversation, not below the sidebar fold.');
     assert.ok(waiting.textContent.includes('等待模型响应'));
     assert.ok(parseInt(waiting.querySelector('.step-duration').textContent)>=12,'Waiting must show elapsed time before any model text.');
@@ -187,6 +203,14 @@ async function main() {
     dom.window.postMessage({type:'aiApprovalResult',id:'auth-1',decision:'once'},'*');
     await new Promise(resolve=>setTimeout(resolve,10));
     assert.strictEqual(permission.querySelectorAll('button').length,0,'Settled approval cards must not accept duplicate decisions.');
+    const completedGroup=permission.closest('.activity-group');
+    dom.window.postMessage({type:'aiResult',answer:'Progress evidence found.',html:'<p>Progress evidence found.</p>'},'*');
+    await new Promise(resolve=>setTimeout(resolve,10));
+    assert.strictEqual(completedGroup.open,false,'A final successful answer must automatically collapse intermediate operations.');
+    completedGroup.querySelector('summary').click();
+    assert.strictEqual(completedGroup.open,true,'Completed operations must remain available for manual inspection.');
+    dom.window.document.getElementById('assistant-prompt').value='Continue investigating';
+    dom.window.document.getElementById('assistant-form').dispatchEvent(new dom.window.Event('submit',{cancelable:true}));
     for(let i=0;i<110;i++)dom.window.postMessage({type:'aiStep',id:'many-'+i,name:'inspect_task',state:'done',result:'x'.repeat(100000)},'*');
     await new Promise(resolve=>setTimeout(resolve,100));
     assert.ok(assistant.querySelectorAll('.assistant-step:not([data-state=running]):not([data-state=blocked])').length<=80,'Unlimited execution must not retain unlimited finished activity DOM.');
@@ -196,6 +220,7 @@ async function main() {
     await new Promise(resolve=>setTimeout(resolve,10));
     assert.strictEqual(assistant.querySelectorAll('.assistant-step[data-state=running]').length,0,'Failure must finish pending indicators.');
     assert.ok(!assistant.textContent.includes('正在查询…'),'Failed replies must not leave a false querying placeholder.');
+    assert.strictEqual([...assistant.querySelectorAll('.activity-group')].at(-1).open,true,'Errors and interrupted work must remain visible for diagnosis.');
     assistant.querySelector('.ai-continuation button').click();
     assert.strictEqual(dom.window.__gpuMessages.at(-1).command,'continueAi','Retry must resume saved work rather than send the same question again.');
     dom.window.postMessage({type:'aiReset'},'*');await new Promise(resolve=>setTimeout(resolve,10));

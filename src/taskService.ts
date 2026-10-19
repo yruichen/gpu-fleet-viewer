@@ -1,15 +1,17 @@
 import * as vscode from 'vscode';
 import { createHash } from 'crypto';
 import { EventEmitter } from 'events';
+import { posix } from 'path';
 import { GpuMonitor, MonitorOptions, ServerSnapshot } from './gpuMonitor';
 import { GpuServerProvider } from './serverProvider';
 import { decorateGpus, markDuplicateServers, ServerStatus, ServerMetadata } from './fleetModel';
-import { parseProgress, TaskEvidence, TaskProcess, TaskQuery, taskReminderTarget, validateTaskPath } from './taskQueries';
+import { TaskEvidence, TaskProcess, TaskQuery, taskReminderTarget, validateTaskPath } from './taskQueries';
 import { createReminder, evaluateReminder, jobHasEnded, nextReminderDelay, GpuReminder, ReminderObservation } from './reminders';
 
 const instances = new WeakMap<vscode.ExtensionContext, TaskService>();
 const REMINDERS = 'gpu-fleet-viewer.reminders';
 const GRANTS = 'gpu-fleet-viewer.taskLogGrants';
+interface SnapshotQuery {promise:Promise<ServerSnapshot>;queue:AbortController;users:number;started:boolean;}
 export function serverId(host: string): string { return 'host-' + createHash('sha256').update(host).digest('hex').slice(0, 16); }
 export function visibleFleet(data: ServerStatus[], masks: Record<string, string[]>): ServerStatus[] {
     return data.map(server => {
@@ -27,16 +29,37 @@ export class TaskService implements vscode.Disposable {
     private monitor = new GpuMonitor();
     private events = new EventEmitter();
     private cache = new Map<string, ServerSnapshot>();
-    private inflight = new Map<string, Promise<ServerSnapshot>>();
+    private inflight = new Map<string, SnapshotQuery>();
     private processes = new Map<string, TaskProcess>();
     private reminderTargets = new Map<string, TaskProcess>();
     private logs = new Map<string, Set<string>>();
+    private directories = new Map<string, Set<string>>();
     private watches: GpuReminder[];
     private grants: Record<string, string[]>;
     private timer?: NodeJS.Timeout;
     private disposed = false;
     private checking = false;
+    private activeQueries=0;
+    private queryWaiters:(()=>void)[]=[];
     private writes: Promise<void> = Promise.resolve();
+    private async runQuery<T>(operation:()=>Promise<T>,signal?:AbortSignal):Promise<T>{
+        this.assertActive(signal);
+        while(this.activeQueries>=Math.max(1,Math.min(32,vscode.workspace.getConfiguration('gpu-fleet-viewer').get<number>('maxConcurrentHosts',8)))){
+            await new Promise<void>((resolve,reject)=>{
+                const resume=()=>{signal?.removeEventListener('abort',cancel);resolve();};
+                const cancel=()=>{this.queryWaiters=this.queryWaiters.filter(w=>w!==resume);reject(new Error('Request cancelled.'));};
+                this.queryWaiters.push(resume);signal?.addEventListener('abort',cancel,{once:true});
+                if(signal?.aborted)cancel();
+            });
+            this.assertActive(signal);
+        }
+        this.activeQueries++;
+        try{return await operation();}finally{
+            this.activeQueries--;
+            const available=Math.max(1,Math.min(32,vscode.workspace.getConfiguration('gpu-fleet-viewer').get<number>('maxConcurrentHosts',8)))-this.activeQueries;
+            this.queryWaiters.splice(0,Math.max(0,available)).forEach(resume=>resume());
+        }
+    }
     private constructor(private context: vscode.ExtensionContext) {
         this.watches = context.globalState.get<GpuReminder[]>(REMINDERS, []).flatMap(w => {
             if(!w || typeof w.id !== 'string' || !Number.isFinite(w.createdAt) || !['active','fired','expired','cancelled'].includes(w.status)) return [];
@@ -47,7 +70,7 @@ export class TaskService implements vscode.Disposable {
         this.schedule();
     }
     onChange(callback: () => void): vscode.Disposable { this.events.on('change', callback); return { dispose: () => this.events.off('change', callback) }; }
-    dispose(): void { this.disposed = true; clearTimeout(this.timer); this.events.removeAllListeners(); }
+    dispose(): void { this.disposed = true; clearTimeout(this.timer);this.queryWaiters.splice(0).forEach(resume=>resume()); this.events.removeAllListeners(); }
     options(signal?: AbortSignal): MonitorOptions {
         const c = vscode.workspace.getConfiguration('gpu-fleet-viewer');
         return { sshConfigPath: c.get<string>('sshConfigPath','~/.ssh/config'), timeoutSeconds: c.get<number>('sshTimeout',8),
@@ -62,18 +85,36 @@ export class TaskService implements vscode.Disposable {
         if (!host) throw new Error('Choose a currently configured server from the fleet data.');
         return host.host;
     }
+    private joinSnapshot(task:SnapshotQuery,signal?:AbortSignal):Promise<ServerSnapshot>{
+        task.users++;
+        return new Promise((resolve,reject)=>{
+            let settled=false;
+            const release=()=>{
+                if(settled)return false;settled=true;signal?.removeEventListener('abort',cancel);task.users--;
+                if(!task.users&&!task.started)task.queue.abort();
+                return true;
+            };
+            const cancel=()=>{if(release())reject(new Error('Request cancelled.'));};
+            task.promise.then(value=>{if(release())resolve(value);},error=>{if(release())reject(error);});
+            signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)cancel();
+        });
+    }
     async snapshot(host: string, options: MonitorOptions, maxAge = 0, monitor = this.monitor): Promise<ServerSnapshot> {
+        this.assertActive(options.signal);
         if (!this.hosts().some(h => h.host === host)) throw new Error('Server is no longer configured.');
         const key = JSON.stringify([host,options.sshConfigPath,options.includeProcessOwners,options.includeProcesses,options.includeHostHealth,options.includeSlurm]);
         const cached = this.cache.get(key);
         if (cached && Date.now()-cached.collectedAt < maxAge) return cached;
         const running = this.inflight.get(key);
-        if (running) return running;
-        const promise = monitor.getServerSnapshot(host, {...options, signal:undefined}).then(value => { this.cache.set(key,value); return value; }).finally(() => this.inflight.delete(key));
-        this.inflight.set(key,promise);
-        return promise;
+        if (running&&!running.queue.signal.aborted) return this.joinSnapshot(running,options.signal);
+        const state={queue:new AbortController(),users:0,started:false};
+        const promise=this.runQuery(()=>{state.started=true;return monitor.getServerSnapshot(host,{...options,signal:undefined});},state.queue.signal)
+            .then(value=>{this.cache.set(key,value);return value;}).finally(()=>{if(this.inflight.get(key)?.promise===promise)this.inflight.delete(key);});
+        const task=Object.assign(state,{promise});
+        this.inflight.set(key,task);
+        return this.joinSnapshot(task,options.signal);
     }
-    async fleet(ids?: string[]): Promise<ServerStatus[]> {
+    async fleet(ids?: string[],signal?:AbortSignal): Promise<ServerStatus[]> {
         const c = vscode.workspace.getConfiguration('gpu-fleet-viewer');
         const all = this.hosts().filter(h => !ids || ids.includes(h.id));
         const result: ServerStatus[] = [];
@@ -81,22 +122,27 @@ export class TaskService implements vscode.Disposable {
         let index=0;
         await Promise.all(Array.from({length:workers},async () => {
             while(index<all.length) {
+                this.assertActive(signal);
                 const entry=all[index++];
                 try {
-                    const snap=await this.snapshot(entry.host,this.options(),5000);
+                    const snap=await this.snapshot(entry.host,this.options(signal),5000);
                     result.push({...snap,host:entry.host,metadata:{alias:entry.label},gpus:decorateGpus(snap.gpus,{
                         availabilityRequireNoProcesses:c.get('availabilityRequireNoProcesses',true), availabilityMaxMemoryMiB:c.get('availabilityMaxMemoryMiB',512),availabilityMaxUtilization:c.get('availabilityMaxUtilization',10)
                     }),stale:false,lastSuccessAt:snap.collectedAt});
-                } catch { result.push({host:entry.host,gpus:[],collectedAt:Date.now(),latencyMs:0,stale:true,error:'SSH query failed; no current observations.'}); }
+                } catch {this.assertActive(signal); result.push({host:entry.host,gpus:[],collectedAt:Date.now(),latencyMs:0,stale:true,error:'SSH query failed; no current observations.'}); }
             }
         }));
         return markDuplicateServers(all.flatMap(h => result.filter(s => s.host===h.host)));
     }
     private assertActive(signal?: AbortSignal) { if (signal?.aborted || this.disposed) throw new Error('Request cancelled.'); }
     logLimits(){const c=vscode.workspace.getConfiguration('gpu-fleet-viewer');return {lines:Math.max(20,Math.min(10000,c.get<number>('ai.logTailLines',500))),maxBytes:Math.max(16,Math.min(2048,c.get<number>('ai.logTailKiB',256)))*1024};}
+    private rememberDirectory(id:string,path:unknown){
+        try {const p=validateTaskPath(path);if(p==='/')return;const paths=this.directories.get(id)||new Set<string>();paths.add(p);this.directories.set(id,paths);} catch { /* Sensitive paths do not become browsing capabilities. */ }
+    }
     async query(id: string, kind: TaskQuery, args: Record<string,unknown>, signal?: AbortSignal, allowOnce=false): Promise<any> {
         this.assertActive(signal);
         const host=this.resolve(id);
+        if(kind==='files'&&!this.directories.get(id)?.has(validateTaskPath(args.path)))throw new Error('Directory has not been discovered from this task. Inspect its process or Slurm job first, then browse observed child directories.');
         if (kind==='log') {
             const limits=this.logLimits();args={...args,lines:Math.min(Number(args.lines)||limits.lines,limits.lines),maxBytes:Math.min(Number(args.maxBytes)||limits.maxBytes,limits.maxBytes)};
             const path=validateTaskPath(args.path);
@@ -106,11 +152,11 @@ export class TaskService implements vscode.Disposable {
             }
         }
         if (kind==='process' || (kind==='resources' && args.pid!==undefined)) {
-            const snap=await this.snapshot(host,this.options(),5000);
+            const snap=await this.snapshot(host,this.options(signal),5000);
             const known=snap.gpus.some(g => g.processes.some(p => p.pid===args.pid)) || (kind==='process' && this.processes.has(id+':'+args.pid));
             if (!known) throw new Error('PID is not associated with a monitored GPU task. Refresh the fleet first.');
         }
-        const result=await this.monitor.queryTask(host,kind,args,this.options(signal));
+        const result=await this.runQuery(()=>this.monitor.queryTask(host,kind,args,this.options(signal)),signal);
         this.assertActive(signal);
         if(kind==='process') {
             const evidence=result as TaskEvidence;
@@ -126,15 +172,23 @@ export class TaskService implements vscode.Disposable {
             if(target){this.reminderTargets.set(key,target);this.reminderTargets.set(id+':'+target.pid,target);}
             for(const p of evidence.chain.filter(p=>root&&p.user===root.user&&p.pid!=='1')) {
                 const paths=this.logs.get(id)||new Set<string>(); p.logs.forEach(log => { try { paths.add(validateTaskPath(log)); } catch { /* Sensitive paths are not log candidates. */ } }); this.logs.set(id,paths);
+                this.rememberDirectory(id,p.cwd);
+                for(const log of p.logs)this.rememberDirectory(id,posix.dirname(log));
+                for(const entry of p.paths||[])this.rememberDirectory(id,entry.kind==='directory'?entry.path:posix.dirname(entry.path));
             }
+            result.browsableDirectories=[...this.directories.get(id)||[]];
         }
         if(kind==='job' && typeof result.detail==='string') {
-            for(const match of result.detail.matchAll(/\bStd(?:Out|Err)=(\S+)/g)) {
-                try { const p=validateTaskPath(match[1]); const paths=this.logs.get(id)||new Set<string>(); paths.add(p); this.logs.set(id,paths); } catch { /* Only task log paths can be offered. */ }
+            for(const match of result.detail.matchAll(/\b(WorkDir|StdOut|StdErr)=(.*?)(?=\s+[A-Za-z][A-Za-z0-9_]*=|$)/g)) {
+                try { const p=validateTaskPath(match[2].trim());if(match[1]==='WorkDir')this.rememberDirectory(id,p);
+                    else {const paths=this.logs.get(id)||new Set<string>(); paths.add(p); this.logs.set(id,paths);this.rememberDirectory(id,posix.dirname(p));}
+                } catch { /* Only safe task paths can be offered. */ }
             }
+            result.browsableDirectories=[...this.directories.get(id)||[]];
         }
+        if(kind==='files')for(const entry of result.entries||[])if(entry.kind==='directory')this.rememberDirectory(id,entry.path);
         this.events.emit('change');
-        return kind==='log' ? {...result,progress:parseProgress(result.text),collectedAt:new Date().toISOString()} : result;
+        return kind==='log' ? {...result,collectedAt:new Date().toISOString()} : result;
     }
     state() {
         const paths=new Map([...this.logs].map(([id,values])=>[id,new Set(values)]));
@@ -152,7 +206,8 @@ export class TaskService implements vscode.Disposable {
         const write=this.writes.catch(()=>{}).then(()=>this.context.globalState.update(REMINDERS,value));
         this.writes=write; await write; this.events.emit('change'); this.schedule();
     }
-    async manage(input: Record<string,unknown>): Promise<any> {
+    async manage(input: Record<string,unknown>,signal?:AbortSignal): Promise<any> {
+        this.assertActive(signal);
         if(input.action==='list') return this.watches;
         if(input.action==='cancel') {
             const watch=this.watches.find(w=>w.id===input.id&&w.status==='active');
@@ -171,7 +226,7 @@ export class TaskService implements vscode.Disposable {
         this.resolve(input.server);
         const args={...input};
         if(args.mode==='taskEnded' && !args.job) {
-            const snap=await this.snapshot(this.resolve(args.server),this.options(),5000);
+            const snap=await this.snapshot(this.resolve(args.server),this.options(signal),5000);
             const job=snap.gpus.flatMap(g=>g.processes).find(p=>p.pid===args.pid)?.slurm?.id;
             if(job)args.job=job;
         }
@@ -182,9 +237,10 @@ export class TaskService implements vscode.Disposable {
         }
         const watch=createReminder(args);
         if(watch.mode==='available') {
-            const snap=await this.snapshot(this.resolve(watch.server),this.options(),5000);
+            const snap=await this.snapshot(this.resolve(watch.server),this.options(signal),5000);
             if(watch.gpuIds.some(id=>!snap.gpus.some(g=>g.uuid===id))) throw new Error('Selected GPU no longer exists on this server.');
         }
+        this.assertActive(signal);
         const duplicate=this.watches.find(w=>w.status==='active'&&w.server===watch.server&&w.mode===watch.mode&&JSON.stringify(w.gpuIds.slice().sort())===JSON.stringify(watch.gpuIds.slice().sort())&&w.match===watch.match&&w.pid===watch.pid&&w.identity===watch.identity&&w.job===watch.job&&Math.abs((w.at||0)-(watch.at||0))<1000
             &&(input.expiresAt===undefined||Math.abs(w.expiresAt-watch.expiresAt)<1000)&&(input.notBefore===undefined||Math.abs(w.notBefore-watch.notBefore)<1000));
         if(duplicate) return duplicate;
@@ -208,10 +264,10 @@ export class TaskService implements vscode.Disposable {
                     const host=this.resolve(watch.server);
                     if(watch.mode==='taskEnded' && now<watch.expiresAt) {
                         if(watch.job) {
-                            const job=await this.monitor.queryTask(host,'job',{job:watch.job},this.options());
+                            const job=await this.runQuery(()=>this.monitor.queryTask(host,'job',{job:watch.job},this.options()));
                             sample={online:true,fresh:true,taskEnded:jobHasEnded(watch.job,job.detail,job.accounting)}; suffix=String(job.accounting||job.detail||'').slice(0,500);
                         } else {
-                            const result=await this.monitor.queryTask(host,'process',{pid:watch.pid},this.options()) as TaskEvidence;
+                            const result=await this.runQuery(()=>this.monitor.queryTask(host,'process',{pid:watch.pid},this.options())) as TaskEvidence;
                             sample={online:true,fresh:true,taskIdentity:result.chain[0]?.identity||'',taskEnded:['Z','X'].includes(result.chain[0]?.state||'')}; suffix='Task is no longer running with its original identity; exit success is unknown.';
                         }
                     } else if(now<watch.expiresAt) {

@@ -48,9 +48,13 @@ export function getAssistantScript(): string {
             }
             function entry(role,text){
                 const section=node('section','chat-entry '+role);
-                section.append(node('strong','chat-role',role==='user'?t('you'):role==='error'?t('requestError'):t('assistant')));
+                const heading=node('strong','chat-role');heading.append(icon(role==='user'?'user':'sparkles'),document.createTextNode(role==='user'?t('you'):role==='error'?t('requestError'):t('assistant')));section.append(heading);
                 const body=node('div','chat-text',text||'');body.hidden=!text;
-                if(role==='assistant'){const steps=node('div','chat-activity');steps.setAttribute('aria-label',tr('Operation activity','操作过程'));section.append(steps);}
+                if(role==='assistant'){
+                    const group=node('details','activity-group');group.open=true;group.hidden=true;
+                    const summary=node('summary','activity-summary');summary.append(icon('terminal'),node('span','activity-summary-label',tr('Operation activity','执行过程')));
+                    const steps=node('div','chat-activity');steps.setAttribute('aria-label',tr('Operation activity','操作过程'));group.append(summary,steps);section.append(group);
+                }
                 section.append(body);messages.append(section);
                 while(messages.childElementCount>32)messages.firstElementChild.remove();return body;
             }
@@ -69,11 +73,11 @@ export function getAssistantScript(): string {
             function setStatus(value){if(statusLabel.textContent!==value)statusLabel.textContent=value;}
             function toolLabel(name,args={}){
                 const server=state.servers.find(s=>s.id===args.server)?.label||args.server||'';
-                const names={get_fleet_status:tr('Refresh GPU status','刷新 GPU 状态'),inspect_task:tr('Inspect task','查询任务'),inspect_job:tr('Inspect Slurm job','查询 Slurm 作业'),inspect_host:tr('Inspect host resources','检查服务器资源'),read_task_log:tr('Read task log','读取任务日志'),manage_reminders:tr('Manage reminder','处理提醒')};
+                const names={get_fleet_status:tr('Refresh GPU status','刷新 GPU 状态'),inspect_task:tr('Inspect task','查询任务'),inspect_job:tr('Inspect Slurm job','查询 Slurm 作业'),inspect_host:tr('Inspect host resources','检查服务器资源'),list_task_files:tr('Explore task directory','查看任务目录'),read_task_log:tr('Read task text','读取任务文件'),manage_reminders:tr('Manage reminder','处理提醒')};
                 return (names[name]||name)+(server?' · '+server:'')+(args.pid?' · PID '+args.pid:'')+(args.job?' · '+args.job:'')+(args.path?' · '+args.path:'');
             }
             function activityLabel(step){
-                if(step.state==='blocked'&&step.phase==='approval')return tr('Waiting for your log authorization','等待你授权读取日志');
+                if(step.state==='blocked'&&step.phase==='approval')return tr('Waiting for your file authorization','等待你授权读取文件');
                 if(step.name)return toolLabel(step.name,step.args);
                 const phases={preparing:tr('Prepare context and request','准备上下文和请求'),connecting:tr('Connect to AI service','连接 AI 服务'),waiting:tr('Request sent · waiting for model response','请求已发送，等待模型响应'),receiving:tr('Response received · waiting for content','已收到响应，等待内容'),generating:tr('Generating answer','正在生成回答'),tool:tr('Model preparing a tool call','模型正在准备工具调用'),approval:tr('Waiting for your authorization','等待你的授权')};
                 if(step.state==='done')return step.phase==='preparing'?tr('Context prepared','上下文已准备'):tr('Model response received','模型已返回结果');
@@ -90,7 +94,10 @@ export function getAssistantScript(): string {
             function tickActivity(){
                 for(const step of activity.values())if(step.state==='running')renderActivity(step);
                 if(busy&&currentActivity)setStatus(activityLabel(currentActivity));
-                statusTime.textContent=requestAt?' · '+Math.max(0,Math.floor((Date.now()-requestAt)/1000))+tr('s elapsed',' 秒'):'';
+                const elapsed=requestAt?Math.max(0,Math.floor((Date.now()-requestAt)/1000)):0;
+                statusTime.textContent=requestAt?' · '+elapsed+tr('s elapsed',' 秒'):'';
+                const group=currentReply?.parentElement.querySelector('.activity-group');
+                if(group)group.querySelector('.activity-summary-label').textContent=(busy?tr('Operation activity','执行过程'):tr('View operation activity','查看执行过程'))+' · '+(group.dataset.count||0)+tr(' records',' 条记录')+' · '+elapsed+tr('s',' 秒');
             }
             function pruneActivity(){
                 const rows=Array.from(messages.querySelectorAll('.assistant-step:not([data-state=running]):not([data-state=blocked]), .ai-approval[data-settled]'));
@@ -108,6 +115,7 @@ export function getAssistantScript(): string {
                 if(!currentReply||!currentReply.isConnected)currentReply=entry('assistant','');
                 const id=message.id||message.name||'model';let step=activity.get(id);
                 if(!step){
+                    const group=currentReply.parentElement.querySelector('.activity-group');group.hidden=false;group.dataset.count=String(Number(group.dataset.count||0)+1);
                     const element=node('details','assistant-step');const summary=node('summary');
                     const indicator=node('span','step-indicator');indicator.setAttribute('aria-hidden','true');
                     const label=node('span','step-label'),badge=node('span','step-badge'),duration=node('span','step-duration');duration.setAttribute('aria-hidden','true');
@@ -136,9 +144,10 @@ export function getAssistantScript(): string {
             }
             function approvalCard(message){
                 recordActivity({id:message.operationId,phase:'approval',state:'blocked'});
-                const card=node('section','ai-approval');card.setAttribute('aria-label',tr('Log read authorization','日志读取授权'));
-                card.append(node('strong','',tr('Read task log','读取任务日志')),node('span','subtle block',message.label||message.server),node('code','block',message.path),
-                    node('p','subtle',tr('Read up to ','读取末尾最多 ')+message.maxLines+tr(' lines / ',' 行 / ')+Math.round(message.maxBytes/1024)+' KiB'+tr(', sent to ', '，发送至 ')+message.endpoint));
+                currentReply.parentElement.querySelector('.activity-group').open=true;
+                const card=node('section','ai-approval');card.setAttribute('aria-label',tr('Task file authorization','任务文件读取授权'));
+                card.append(node('strong','',tr('Read task file','读取任务文件')),node('span','subtle block',message.label||message.server),node('code','block',message.path),
+                    node('p','subtle',(message.view==='head'?tr('Read the beginning, up to ','读取开头，最多 '):tr('Read the tail, up to ','读取末尾，最多 '))+message.maxLines+tr(' lines / ',' 行 / ')+Math.round(message.maxBytes/1024)+' KiB'+tr(', sent to ', '，发送至 ')+message.endpoint));
                 const actions=node('div','dialog-actions');
                 for(const [decision,label] of [['once',tr('Allow once and continue','允许本次并继续')],['remember',tr('Always allow this file','始终允许此文件')],['deny',tr('Decline','拒绝')]]){
                     actions.append(button(label,decision==='once'?'':'secondary-button',()=>{for(const b of actions.querySelectorAll('button'))b.disabled=true;vscode.postMessage({command:'resolveAiApproval',id:message.id,decision});}));
@@ -230,6 +239,10 @@ export function getAssistantScript(): string {
                 else if(message.type==='aiApproval')approvalCard(message);
                 else if(message.type==='aiApprovalResult'){const item=approvalCards.get(message.id);if(item){item.actions.replaceChildren(node('span','subtle',message.decision==='deny'?tr('Declined · continuing with other evidence','已拒绝，将使用其他证据'):message.decision==='cancelled'?tr('Cancelled','已取消'):tr('Allowed · continuing automatically','已允许，自动继续查询')));item.card.dataset.settled='true';approvalCards.delete(message.id);pruneActivity();}}
                 else if(message.type==='aiActivity')recordActivity(message);
+                else if(message.type==='aiCapability'){
+                    if(!currentReply)currentReply=entry('assistant','');
+                    const warning=node('p','ai-capability-warning',message.text);warning.setAttribute('role','status');currentReply.before(warning);
+                }
                 else if(message.type==='aiDelta')answer(message);
                 else if(message.type==='aiResult'){
                     busy=false;finishActivity(message.error?(/cancel/i.test(message.error)?'cancelled':'error'):'done');controls();cancel.disabled=false;
@@ -240,6 +253,7 @@ export function getAssistantScript(): string {
                         if(currentReply&&!currentReply.textContent.trim())currentReply.hidden=true;entry('error',message.error);lastOutcome=message.error;setStatus(lastOutcome);if(!prompt.value)prompt.value=lastQuestion;}
                     if(message.paused){lastOutcome=tr('Paused at your configured budget','已按你设置的预算暂停');setStatus(lastOutcome);}
                     if(message.canContinue)continuationCard(message);
+                    if(!message.error&&!message.paused&&currentReply)currentReply.parentElement.querySelector('.activity-group').open=false;
                     currentReply=undefined;
                 } else if(message.type==='aiStep'){
                     if(message.name==='compatibility')compatibilityWarning=message.text;
@@ -263,10 +277,15 @@ export function getAssistantCss(): string {
         .assistant-chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
         .assistant-messages { overflow: auto; flex: 1; padding: 10px 18px; min-height: 120px; }
         .assistant-messages:empty::after { content: 'GPU Fleet'; display: block; margin-top: 18%; text-align: center; color: var(--vscode-descriptionForeground); font-size: 18px; opacity: .5; }
-        .chat-entry { padding: 12px 0; }
-        .chat-entry.user { border-bottom: 1px solid var(--vscode-widget-border); }
-        .chat-role { display: block; color: var(--vscode-descriptionForeground); font-size: 11px; margin-bottom: 5px; }
-        .chat-text { overflow-wrap: anywhere; font-size: 12px; line-height: 1.75; user-select: text; }
+        .chat-entry { padding:16px 0; min-width:0; }
+        .chat-entry.user { margin:12px 0 4px 28px; padding:10px 13px; border:1px solid var(--vscode-widget-border); border-radius:10px 10px 3px 10px; background:color-mix(in srgb,var(--vscode-foreground) 5%,var(--vscode-editor-background)); }
+        .chat-entry.assistant { margin-right:8px; }
+        .chat-role { display:flex; align-items:center; gap:6px; color:var(--vscode-descriptionForeground); font-size:10px; font-weight:500; margin-bottom:8px; }
+        .chat-role .icon { width:13px; height:13px; flex-basis:13px; }
+        .chat-entry.assistant .chat-role { color:var(--vscode-foreground); font-weight:600; }
+        .chat-entry.assistant .chat-role .icon { color:var(--vscode-textLink-foreground); }
+        .chat-text { overflow-wrap:anywhere; font-size:12px; line-height:1.8; user-select:text; }
+        .chat-entry.user .chat-text { line-height:1.6; }
         .chat-entry.user .chat-text, .chat-entry.error .chat-text { white-space: pre-wrap; }
         .chat-text > :first-child { margin-top: 0; }
         .chat-text h1,.chat-text h2,.chat-text h3 { font-size: 14px; margin: 16px 0 8px; }
@@ -278,6 +297,7 @@ export function getAssistantCss(): string {
         .chat-text td,.chat-text th { padding: 5px 8px; border: 1px solid var(--vscode-widget-border); text-align: left; }
         .chat-text blockquote { margin-left: 0; border-left: 2px solid var(--vscode-widget-border); padding-left: 12px; color: var(--vscode-descriptionForeground); }
         .chat-text a { color: var(--vscode-textLink-foreground); }
+        .chat-entry.error { border-left:2px solid var(--vscode-editorWarning-foreground); padding:8px 12px; margin:8px 0; }
         .chat-entry.error .chat-text { color: var(--vscode-editorWarning-foreground); }
         .assistant-form { display: grid; gap: 6px; padding: 10px 14px; border-top: 1px solid var(--vscode-widget-border); font-size: 11px; }
         .assistant-form textarea { width: 100%; resize: vertical; min-height: 62px; max-height: 150px; }
@@ -296,6 +316,14 @@ export function getAssistantCss(): string {
         .ai-approval .dialog-actions { gap:6px; }
         .ai-approval button { font-size:11px; }
         .chat-activity { display:grid; gap:6px; margin:0 0 10px; }
+        .activity-group { margin:0 0 10px; min-width:0; }
+        .activity-group[hidden] { display:none; }
+        .activity-summary { display:flex; align-items:center; gap:7px; min-height:28px; color:var(--vscode-descriptionForeground); font-size:11px; cursor:pointer; list-style:none; }
+        .activity-summary::after { content:'›'; margin-left:auto; font-size:16px; transform:rotate(0deg); }
+        .activity-group[open] > .activity-summary::after { transform:rotate(90deg); }
+        .activity-group[open] > .activity-summary { margin-bottom:8px; }
+        .activity-summary:hover { color:var(--vscode-foreground); }
+        .ai-capability-warning { border-left:2px solid var(--vscode-editorWarning-foreground); padding:8px 10px; color:var(--vscode-editorWarning-foreground); font-size:11px; line-height:1.6; }
         .assistant-step { min-width:0; border-left:2px solid var(--vscode-widget-border); padding-left:8px; font-size:11px; }
         .assistant-step summary { display:flex; align-items:center; gap:7px; cursor:pointer; min-height:24px; list-style:none; }
         .step-label { flex:1; min-width:0; overflow-wrap:anywhere; color:var(--vscode-descriptionForeground); }

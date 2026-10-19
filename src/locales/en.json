@@ -1,9 +1,7 @@
 {
   "settings": "Settings",
   "refresh": "Refresh",
-  "switchLanguage": "切换到简体中文",
-  "languageButton": "中文",
-  "dashboardTitle": "Research GPU Fleet",
+  "dashboardTitle": "GPU Fleet",
   "panelTitle": "GPU Fleet",
   "waiting": "Waiting for data…",
   "refreshing": "Refreshing…",

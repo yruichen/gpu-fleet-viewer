@@ -2,6 +2,16 @@
 
 All notable changes to GPU Fleet Viewer are documented here.
 
+## 1.4.2 - 2026-10-19
+
+- Let the model explore observed task directories and open-file/path metadata, then request authorized head/tail text from actual files, without filename templates or question routing rules.
+- Remove fixed-format progress extraction; send raw task evidence for model interpretation. Retain exact-file approval, read-only operations and sensitive-path protection.
+- Retry non-streaming requests with tools before plain-chat fallback; explicitly show when the API/model cannot support investigation tools.
+- Automatically collapse completed operation records after the final answer, with manual re-opening; distinguish user inputs, assistant answers and failures using restrained message styling.
+- Share one SSH concurrency budget across dashboards, assistant queries and reminders; coalesce matching snapshots, reuse very recent data, and back off failed automatic queries while preserving immediate manual retries.
+- Reorganize the dashboard header, actionable availability/warning summaries, search and compact filters; move language into settings and standardize the product name as GPU Fleet.
+- Distinguish task details from the main dashboard and replace the extension, sidebar and dashboard marks with one simplified chip symbol.
+
 ## 1.4.1 - 2026-10-19
 
 - Show actual AI connection, waiting, response and tool stages inline with elapsed time and expandable evidence.

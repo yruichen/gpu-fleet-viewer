@@ -125,7 +125,7 @@ export function getPreferencesScript(): string {
                             }
                         } else if (field.type === 'enum') {
                             for (const option of field.options) {
-                                const entry = node('option', '', option === 'auto' ? t('followEditor') : option === 'openai' ? 'OpenAI compatible' : option === 'anthropic' ? 'Anthropic Messages' : option);
+                                const entry = node('option', '', option === 'auto' ? t('followEditor') : option === 'openai' ? 'OpenAI compatible' : option === 'anthropic' ? 'Anthropic Messages' : option==='en'?'English':option==='zh-CN'?'简体中文':option);
                                 entry.value = option;
                                 input.append(entry);
                             }

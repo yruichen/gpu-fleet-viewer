@@ -1,10 +1,8 @@
 {
   "settings": "设置",
   "refresh": "刷新",
-  "switchLanguage": "Switch to English",
-  "languageButton": "EN",
-  "dashboardTitle": "科研 GPU 集群",
-  "panelTitle": "GPU 集群",
+  "dashboardTitle": "GPU Fleet",
+  "panelTitle": "GPU Fleet",
   "waiting": "等待数据…",
   "refreshing": "正在刷新…",
   "refreshQueued": "已加入刷新队列…",

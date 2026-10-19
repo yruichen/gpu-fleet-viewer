@@ -39,6 +39,7 @@ export interface ServerStatus {
     healthAvailable?: boolean;
     error?: string;
     errorCategory?: ServerErrorCategory;
+    nextRetryAt?: number;
 }
 
 export interface GpuStatusSummary {

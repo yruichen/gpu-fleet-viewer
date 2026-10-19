@@ -22,7 +22,7 @@ export function getDashboardScript(): string {
         const searchInput = document.getElementById('search-input');
         const statusFilter = document.getElementById('status-filter');
         const sortSelect = document.getElementById('sort-select');
-        const languageButton = document.getElementById('language-button');
+        const refreshMode = document.getElementById('refresh-mode');
         const refreshButton = document.getElementById('refresh-button');
         const settingsButton = document.getElementById('settings-button');
         const assistantButton = document.getElementById('assistant-button');
@@ -88,14 +88,13 @@ export function getDashboardScript(): string {
 
         function applyStaticLanguage() {
             document.documentElement.lang = language;
-            languageButton.textContent = t('languageButton');
-            languageButton.title = t('switchLanguage');
             settingsButton.replaceChildren(icon('settings-2'), document.createTextNode(t('settings')));
             assistantButton.replaceChildren(icon('sparkles'), document.createTextNode(t('assistant')));
             refreshButton.replaceChildren(icon('refresh-cw'), document.createTextNode(t('refresh')));
             document.getElementById('min-memory-label').textContent = t('minFreeMemory');
             document.getElementById('min-gpus-label').textContent = t('matchingGpus');
             myTasksButton.replaceChildren(icon('user'), document.createTextNode(t('myTasks')));
+            myTasksButton.title=currentMessage?.preferences?.researchUser?taskText('Filter by your configured username','按设置中的用户名筛选'):taskText('Set your remote username in Settings','在设置中填写远程用户名');
             myTasksButton.setAttribute('aria-pressed', String(Boolean(currentMessage && currentMessage.preferences && currentMessage.preferences.researchUser && selectedUser === currentMessage.preferences.researchUser)));
             resetFiltersButton.replaceChildren(icon('rotate-ccw'), document.createTextNode(t('resetFilters')));
             searchInput.placeholder = t('search');
@@ -125,17 +124,19 @@ export function getDashboardScript(): string {
                 const progressText = total ? ' ' + completed + '/' + total : '';
                 refreshState.textContent = t('refreshing') + progressText;
             } else if (currentMessage) {
-                refreshState.textContent = t('updated') + ' ' + new Date(currentMessage.summary.updatedAt).toLocaleTimeString() +
-                    ' · ' + visibleGpuCount + ' ' + t('shown');
+                refreshState.textContent = t('updated') + ' ' + new Date(currentMessage.summary.updatedAt).toLocaleTimeString();
             }
+            const automatic=currentMessage?.refresh?.automatic??currentMessage?.preferences?.autoRefresh??true;
+            const interval=currentMessage?.refresh?.intervalSeconds||currentMessage?.preferences?.refreshInterval||5;
+            refreshMode.textContent=automatic?taskText('Auto · ','自动 · ')+interval+taskText('s',' 秒'):taskText('Manual refresh','手动刷新');
+            refreshMode.dataset.automatic=String(automatic);
+            refreshMode.title=taskText('Refresh settings. Interval after each completed round; failed hosts back off. Hidden panels pause by default.','刷新设置：每轮完成后间隔刷新；失败主机延迟重试，面板隐藏时默认暂停。');
         }
 
         refreshButton.addEventListener('click', () => vscode.postMessage({ command: 'refresh' }));
         settingsButton.addEventListener('click', () => window.dispatchEvent(new Event('openPreferences')));
         assistantButton.addEventListener('click', () => window.dispatchEvent(new Event('openAssistant')));
-        languageButton.addEventListener('click', () => vscode.postMessage({
-            command: 'setLanguage', language: language === 'zh-CN' ? 'en' : 'zh-CN'
-        }));
+        refreshMode.addEventListener('click',()=>window.dispatchEvent(new CustomEvent('openPreferences',{detail:'refresh'})));
         searchInput.addEventListener('input', () => renderFleet());
         statusFilter.addEventListener('change', () => renderFleet());
         sortSelect.addEventListener('change', () => renderFleet());
@@ -289,33 +290,31 @@ export function getDashboardScript(): string {
         function renderSummary(summary, settings) {
             const serverPercent = percent(summary.serversOnline, summary.serversTotal);
             const availablePercent = percent(summary.gpusAvailable, summary.gpusTotal);
-            const warningPercent = percent(summary.warnings, summary.gpusTotal);
             const powerPercent = percent(summary.powerDraw, summary.powerLimit);
             const items = [
-                { label: t('servers'), value: summary.serversOnline + ' / ' + summary.serversTotal,
-                    detail: Math.round(serverPercent) + '% ' + t('online'), level: serverPercent, tone: serverPercent < 100 ? 'caution' : 'good' },
-                { label: t('physicalGpus'), value: String(summary.gpusTotal),
-                    detail: summary.utilizationPercent + '% ' + t('util'), level: summary.utilizationPercent, tone: 'neutral' },
-                { label: t('available'), value: summary.gpusAvailable + ' / ' + summary.gpusTotal,
-                    detail: Math.round(availablePercent) + '%', level: availablePercent, tone: 'good' },
-                { label: t('warnings'), value: String(summary.warnings),
-                    detail: Math.round(warningPercent) + '%', level: warningPercent, tone: summary.warnings ? 'warning' : 'neutral' },
+                { label: t('available')+' GPU', value: summary.gpusAvailable + ' / ' + summary.gpusTotal,
+                    detail: Math.round(availablePercent)+'% · '+t('matchesRules'),tone:'good',filter:'available' },
+                { label: t('util'), value:summary.utilizationPercent+'%',detail:taskText('GPU average','GPU 平均利用率'),level:summary.utilizationPercent,tone:'neutral' },
                 { label: t('memory'), value: summary.memoryPercent + '%',
                     detail: formatMemory(summary.memoryUsed) + ' / ' + formatMemory(summary.memoryTotal),
                     level: summary.memoryPercent, tone: summary.memoryPercent >= settings.memoryWarningThreshold ? 'warning' : 'neutral' },
                 { label: t('power'), value: formatPower(summary.powerDraw),
                     detail: Math.round(powerPercent) + '% ' + t('ofLimit'), level: powerPercent,
-                    tone: powerPercent >= settings.powerWarningThreshold ? 'warning' : 'neutral' }
+                    tone: powerPercent >= settings.powerWarningThreshold ? 'warning' : 'neutral' },
+                { label:t('servers'),value:summary.serversOnline+' / '+summary.serversTotal,detail:t('online'),tone:serverPercent<100?'caution':'neutral',filter:serverPercent<100?'offline':undefined },
+                { label:t('warnings'),value:String(summary.warnings),detail:taskText('GPUs above thresholds','超过告警阈值的 GPU'),tone:summary.warnings?'warning':'neutral',filter:summary.warnings?'warning':undefined }
             ];
             const fragment = document.createDocumentFragment();
             for (const summary of items) {
-                const item = node('div', 'summary-item summary-' + summary.tone);
+                const className='summary-item summary-'+summary.tone+(summary.filter?' summary-filter':'');
+                const item=summary.filter?button('',className,()=>{statusFilter.value=statusFilter.value===summary.filter?'all':summary.filter;renderFleet();}):node('div',className);
+                if(summary.filter){item.dataset.filter=summary.filter;item.setAttribute('aria-pressed',String(statusFilter.value===summary.filter));item.title=taskText('Toggle filter: ','切换筛选：')+summary.label;}
                 item.append(
                     node('span', 'summary-label', summary.label),
                     node('strong', 'summary-value', summary.value),
-                    node('span', 'summary-detail', summary.detail),
-                    visualMeter(summary.level, 'visual-meter summary-meter', summary.label)
+                    node('span', 'summary-detail', summary.detail)
                 );
+                if(summary.level!==undefined)item.append(visualMeter(summary.level, 'visual-meter summary-meter', summary.label));
                 fragment.append(item);
             }
             patchChildren(summaryRoot, fragment);
@@ -335,6 +334,7 @@ export function getDashboardScript(): string {
                 renderFleet();
             });
             all.dataset.key = 'all-users';
+            all.setAttribute('aria-pressed',String(!selectedUser));
             fragment.append(all);
             for (const user of users) {
                 const label = user.user + ' · ' + user.gpuCount + ' GPU · ' + formatMemory(user.memoryMiB);
@@ -504,8 +504,8 @@ export function getDashboardScript(): string {
                         for(const path of paths) {
                             const log=node('div','task-parent');log.append(node('strong','',taskText('Task log','任务日志')),node('code','block',path));
                             const progress=taskProgress.get(server.host+':'+path);
-                            if(progress?.progress){
-                                const p=progress.progress;log.append(node('span','block',p.current+'/'+p.total+' '+p.unit+(p.remainingSeconds!==undefined?' · '+taskText('Phase estimate: ','当前阶段估计剩余：')+formatDuration(p.remainingSeconds):'')),node('span','subtle block',taskText('Log updated: ','日志更新：')+new Date(progress.modifiedAt*1000).toLocaleString()));
+                            if(progress){
+                                log.append(node('span','subtle block',taskText('Log updated: ','日志更新：')+new Date(progress.modifiedAt*1000).toLocaleString()),node('span','subtle block',taskText('Read at: ','已读取于：')+new Date(progress.collectedAt).toLocaleTimeString()+taskText(' · Interpretation in AI chat',' · 进度解读见 AI 对话')));
                             } else log.append(node('span','subtle block',taskText('Ask AI to inspect progress; it will request log authorization if needed.','问 AI 查询进度，需要读取日志时会在对话中请求授权。')));
                             details.append(log);
                         }
@@ -571,6 +571,7 @@ export function getDashboardScript(): string {
             if (server.error) {
                 const error = node('div', 'server-error', server.error + (server.stale && server.lastSuccessAt
                     ? ' · ' + t('showingSnapshot') + ' ' + new Date(server.lastSuccessAt).toLocaleTimeString() : ''));
+                if(server.nextRetryAt)error.append(node('span','subtle',taskText('Auto retry ','自动重试 ')+new Date(server.nextRetryAt).toLocaleTimeString()));
                 error.append(button(t('retry'), 'error-retry', () => vscode.postMessage({ command: 'refresh' })));
                 band.append(error);
             }
@@ -637,6 +638,10 @@ export function getDashboardScript(): string {
                 }
             }
             patchChildren(content, fragment);
+            const filtered=Boolean(searchInput.value.trim()||statusFilter.value!=='all'||sortSelect.value!=='configured'||Number(minMemory.value)>0||Number(minGpus.value)>1||selectedUser);
+            resetFiltersButton.hidden=!filtered;
+            document.getElementById('filter-results').textContent=visibleGpuCount+' GPU';
+            for(const item of summaryRoot.querySelectorAll('[data-filter]'))item.setAttribute('aria-pressed',String(statusFilter.value===item.dataset.filter));
             const details=document.createDocumentFragment();
             const selectedServer=currentMessage.settings.showProcesses&&currentMessage.data.find(server=>server.gpus.some(gpu=>selectedGpuKey===server.host+':'+gpu.uuid));
             if(selectedServer)details.append(renderInspector(selectedServer,selectedServer.gpus.find(gpu=>selectedGpuKey===selectedServer.host+':'+gpu.uuid)));
@@ -656,7 +661,7 @@ export function getDashboardScript(): string {
             currentMessage = message;
             language = message.language === 'zh-CN' ? 'zh-CN' : 'en';
             applyStaticLanguage();
-            pageTitle.replaceChildren(icon('cpu'), document.createTextNode(message.title));
+            pageTitle.replaceChildren(icon('fleet'), document.createTextNode(message.title));
             renderSummary(message.summary, message.settings);
             renderUsers(message.users || []);
             renderFleet();
@@ -695,6 +700,7 @@ export function getDashboardCss(): string {
     return `
         :root { color-scheme: light dark; }
         * { box-sizing: border-box; }
+        [hidden] { display:none !important; }
         body { margin: 0; padding: 14px 16px 28px; color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
         button, input, select, textarea { font: inherit; }
         button { min-height: 28px; padding: 4px 10px; border: 1px solid transparent; border-radius: 4px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); cursor: pointer; }
@@ -709,15 +715,23 @@ export function getDashboardCss(): string {
         .secondary-button { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
         .secondary-button:hover { background: var(--vscode-button-secondaryHoverBackground); }
         .compact-button { min-height: 24px; padding: 2px 7px; font-size: 10px; }
-        .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 42px; border-bottom: 1px solid var(--vscode-widget-border); }
-        .toolbar h1 { display: flex; align-items: center; gap: 7px; margin: 0 0 2px; font-size: 14px; }
+        .toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; min-height:56px; margin-bottom:10px; }
+        .toolbar h1 { display:flex; align-items:center; gap:8px; margin:0 0 5px; font-size:17px; font-weight:600; letter-spacing:-.3px; }
+        .toolbar h1 .icon { width:22px; height:22px; flex-basis:22px; }
+        .product-meta { display:flex; align-items:center; gap:10px; min-height:20px; }
+        .meta-button { display:inline-flex; align-items:center; gap:5px; min-height:20px; padding:1px 6px; font-size:10px; background:transparent; color:var(--vscode-descriptionForeground); border:1px solid var(--vscode-widget-border); border-radius:10px; }
+        .meta-button::before { content:''; width:5px; height:5px; border-radius:50%; background:var(--vscode-descriptionForeground); }
+        .meta-button[data-automatic=true]::before { background:var(--vscode-testing-iconPassed); }
+        .meta-button:hover { background:var(--vscode-list-hoverBackground); color:var(--vscode-foreground); }
         .toolbar-actions, .server-actions, .gpu-actions, .copy-actions { display: flex; align-items: center; gap: 6px; }
         .subtle { color: var(--vscode-descriptionForeground); font-size: 11px; }
         .block { display: block; margin-top: 2px; }
-        .summary-strip { display: grid; grid-template-columns: repeat(6, minmax(90px, 1fr)); border-bottom: 1px solid var(--vscode-widget-border); }
-        .summary-item { --meter-color: var(--vscode-charts-blue); display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 8px 12px 9px; border-right: 1px solid var(--vscode-widget-border); }
+        .summary-strip { display:grid; grid-template-columns:1.25fr repeat(5,minmax(90px,1fr)); border:1px solid var(--vscode-widget-border); border-radius:6px; overflow:hidden; background:color-mix(in srgb,var(--vscode-sideBar-background) 35%,var(--vscode-editor-background)); }
+        .summary-item { --meter-color:var(--vscode-charts-blue); display:flex; flex-direction:column; gap:5px; min-width:0; min-height:92px; padding:12px 14px; border:0; border-radius:0; border-right:1px solid var(--vscode-widget-border); background:transparent; color:var(--vscode-foreground); text-align:left; position:relative; }
         .summary-item:last-child { border-right: 0; }
-        .summary-value { overflow: hidden; font-size: 16px; line-height: 1.15; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+        .summary-value { overflow:hidden; font-size:21px; font-weight:600; line-height:1.15; font-variant-numeric:tabular-nums; text-overflow:ellipsis; white-space:nowrap; }
+        .summary-filter:hover { background:var(--vscode-list-hoverBackground); }
+        .summary-filter[aria-pressed=true]::after { content:''; position:absolute; inset:auto 12px 0; height:2px; background:var(--vscode-focusBorder); }
         .summary-detail { overflow: hidden; color: var(--vscode-descriptionForeground); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
         .summary-label, .filter-label { color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 500; }
         .summary-good { --meter-color: var(--vscode-testing-iconPassed); }
@@ -726,29 +740,35 @@ export function getDashboardCss(): string {
         .summary-warning .summary-value { color: var(--vscode-editorWarning-foreground); }
         .visual-meter { display: block; width: 100%; height: 3px; overflow: hidden; border-radius: 2px; background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent); }
         .visual-meter-fill { display: block; height: 100%; border-radius: inherit; background: var(--meter-color, var(--vscode-charts-blue)); transition: width .2s ease; }
-        .summary-meter { margin-top: 2px; }
-        .fleet-controls { display: grid; grid-template-columns: minmax(220px, 1fr) 150px 170px; gap: 7px; padding: 10px 0 7px; }
+        .summary-meter { margin-top:auto; height:2px; }
+        .fleet-filter-panel { border:1px solid var(--vscode-widget-border); border-radius:6px; padding:10px; margin:12px 0; }
+        .fleet-controls { display:grid; grid-template-columns:minmax(180px,1fr) 130px 160px; gap:8px; padding:0 0 9px; }
+        .filter-secondary { display:flex; align-items:center; gap:10px 16px; flex-wrap:wrap; }
+        .filter-actions { display:flex; align-items:center; gap:8px; margin-left:auto; }
+        .filter-actions button { min-height:26px; padding:3px 7px; font-size:11px; }
+        .filter-actions .subtle { white-space:nowrap; }
         input, select, textarea { min-height: 29px; padding: 4px 8px; border: 1px solid var(--vscode-widget-border); border-radius: 4px; color: var(--vscode-input-foreground, var(--vscode-foreground)); background: var(--vscode-input-background); }
-        .resource-controls { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; padding: 0 0 8px; color: var(--vscode-descriptionForeground); font-size: 11px; }
+        .resource-controls { display:flex; align-items:center; gap:8px 10px; flex-wrap:wrap; padding:0; color:var(--vscode-descriptionForeground); font-size:11px; }
         .resource-controls label { display: inline-flex; align-items: center; gap: 6px; }
         .resource-controls input { width: 64px; min-height: 26px; font-size: 11px; font-variant-numeric: tabular-nums; }
         .resource-controls button { display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 3px 6px; font-size: 11px; }
         #my-tasks-button[aria-pressed="true"] { color: var(--vscode-textLink-foreground, var(--vscode-focusBorder)); border-color: var(--vscode-focusBorder); }
-        .user-filters { display: flex; align-items: center; gap: 5px; overflow-x: auto; padding: 0 0 10px; scrollbar-width: thin; }
+        .user-filters { display:flex; align-items:center; gap:5px; overflow-x:auto; flex:1; min-width:180px; scrollbar-width:thin; }
         .filter-label { margin-right: 4px; white-space: nowrap; }
-        .user-chip { min-height: 23px; padding: 2px 7px; color: var(--vscode-foreground); background: var(--vscode-badge-background); font-size: 10px; white-space: nowrap; }
-        .user-chip.active { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+        .user-chip { min-height:24px; padding:2px 7px; color:var(--vscode-descriptionForeground); background:transparent; border:1px solid var(--vscode-widget-border); font-size:10px; white-space:nowrap; }
+        .user-chip:hover { color:var(--vscode-foreground); background:var(--vscode-list-hoverBackground); }
+        .user-chip.active { color:var(--vscode-foreground); background:var(--vscode-list-inactiveSelectionBackground,var(--vscode-button-secondaryBackground)); border-color:var(--vscode-focusBorder); }
         #content { display: grid; gap: 9px; }
         .dashboard-layout { display:grid; grid-template-columns:minmax(0,1fr); align-items:start; gap:14px; }
         .dashboard-layout.details-open { grid-template-columns:minmax(0,1fr) minmax(320px,380px); }
-        .gpu-details { position:sticky; top:14px; max-height:calc(100vh - 28px); overflow:auto; min-width:0; border:1px solid var(--vscode-widget-border); border-radius:5px; background:var(--vscode-editor-background); }
+        .gpu-details { position:sticky; top:14px; max-height:calc(100vh - 28px); overflow:auto; min-width:0; border:1px solid var(--vscode-panel-border,var(--vscode-widget-border)); border-radius:6px; background:var(--vscode-sideBar-background,var(--vscode-editor-background)); box-shadow:0 2px 8px var(--vscode-widget-shadow); }
         .gpu-details[hidden] { display:none; }
         .gpu-details .process-inspector { margin:0; border:0; border-radius:0; }
-        .gpu-details .inspector-header { position:sticky; top:0; z-index:1; padding:10px 12px; background:var(--vscode-editor-background); }
+        .gpu-details .inspector-header { position:sticky; top:0; z-index:1; padding:12px; background:var(--vscode-sideBar-background,var(--vscode-editor-background)); }
         .gpu-details .inspector-header > div { min-width:0; overflow-wrap:anywhere; }
         .gpu-details .task-inspector-layout { grid-template-columns:minmax(0,1fr); }
         .gpu-details .task-list { max-height:180px; border-right:0; border-bottom:1px solid var(--vscode-widget-border); }
-        .gpu-details .task-details { max-height:none; overflow:visible; }
+        .gpu-details .task-details { max-height:none; overflow:visible; background:var(--vscode-editor-background); border-top:1px solid var(--vscode-widget-border); }
         .gpu-details .task-primary-actions, .gpu-details .dialog-actions { flex-wrap:wrap; }
         .gpu-details .inspector-empty { padding:12px; }
         #content { container-type:inline-size; }

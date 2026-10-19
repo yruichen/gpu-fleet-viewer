@@ -72,6 +72,7 @@ export class GpuViewPanel {
     private readonly previousAvailability = new Map<string, boolean>();
     private readonly previousServerOnline = new Map<string, boolean>();
     private readonly duplicateAliases = new Map<string, string>();
+    private readonly failedHosts = new Map<string,{attempts:number;nextRetryAt:number}>();
     private readonly lastSlurmQueryAt = new Map<string, number>();
     private readonly cachedSlurmByProcess = new Map<string, Map<string, NonNullable<FleetGpuInfo['processes'][number]['slurm']>>>();
     private autoRefreshTimer: NodeJS.Timeout | undefined;
@@ -219,13 +220,6 @@ export class GpuViewPanel {
             case 'savePreferences':
                 await this.savePreferences(payload.values);
                 break;
-            case 'setLanguage':
-                if (payload.language === 'en' || payload.language === 'zh-CN') {
-                    await vscode.workspace
-                        .getConfiguration('gpu-fleet-viewer')
-                        .update('language', payload.language, vscode.ConfigurationTarget.Global);
-                }
-                break;
             case 'copyValue':
                 await this.copyRequestedValue(payload);
                 break;
@@ -261,6 +255,7 @@ export class GpuViewPanel {
             if (event.affectsConfiguration('gpu-fleet-viewer.sshConfigPath')) {
                 this.duplicateAliases.clear();
                 this.lastSuccessful.clear();
+                this.failedHosts.clear();
                 GpuViewPanel.snapshotCache.clear();
             }
             await this.requestRefresh(true);
@@ -283,7 +278,7 @@ export class GpuViewPanel {
             } finally { this.savingPreferences = false; }
             if (entries.some(([key]) => ['ai.protocol','ai.baseUrl','ai.model'].includes(key))) this.assistant.reset();
             if (entries.some(([key]) => key === 'sshConfigPath')) {
-                this.duplicateAliases.clear(); this.lastSuccessful.clear(); GpuViewPanel.snapshotCache.clear();
+                this.duplicateAliases.clear(); this.lastSuccessful.clear();this.failedHosts.clear(); GpuViewPanel.snapshotCache.clear();
             }
             await this.panel.webview.postMessage({ type: 'preferencesResult', success: true, values: changes });
             if (entries.some(([key]) => (DATA_REFRESH_KEYS as readonly string[]).includes(key))) {
@@ -315,10 +310,14 @@ export class GpuViewPanel {
         }
         if (config.get<boolean>('pauseWhenHidden', true) && !this.panel.visible) return;
         const interval = Math.max(2, config.get<number>('refreshInterval', 5));
+        let delay=interval*1000;
+        const hosts=this.host?[this.host]:GpuServerProvider.getHosts().map(h=>h.host);
+        const retryTimes=hosts.map(host=>this.failedHosts.get(host)?.nextRetryAt||0);
+        if(retryTimes.length&&retryTimes.every(at=>at>Date.now()))delay=Math.max(delay,Math.min(...retryTimes)-Date.now());
         this.autoRefreshTimer = setTimeout(() => {
             this.autoRefreshTimer = undefined;
             void this.requestRefresh(false);
-        }, interval * 1000);
+        }, delay);
     }
 
     private async showCachedAndRefreshIfStale(): Promise<void> {
@@ -353,7 +352,8 @@ export class GpuViewPanel {
         const run = async () => {
             do {
                 this.refreshQueued = false;
-                await this.refreshOnce();
+                await this.refreshOnce(queueIfBusy);
+                queueIfBusy=true;
             } while (this.refreshQueued && !this.disposed);
         };
         const promise = run().finally(() => {
@@ -366,7 +366,7 @@ export class GpuViewPanel {
         await promise;
     }
 
-    private async refreshOnce(): Promise<void> {
+    private async refreshOnce(force=false): Promise<void> {
         const config = vscode.workspace.getConfiguration('gpu-fleet-viewer');
         const settings = this.readViewSettings();
         const hosts = this.host ? [{ host: this.host }] : GpuServerProvider.getHosts();
@@ -375,7 +375,7 @@ export class GpuViewPanel {
         const metadata = this.context.globalState.get<Record<string, ServerMetadata>>(METADATA_KEY, {});
         const queryHosts = hostNames.filter(host => {
             const primary = this.duplicateAliases.get(host);
-            return !primary || !hostNames.includes(primary);
+            return (!primary || !hostNames.includes(primary)) && (force || (this.failedHosts.get(host)?.nextRetryAt||0)<=Date.now());
         });
         const results = new Map<string, ServerStatus>();
         const current = new Map(this.lastData.map(server => [server.host, server]));
@@ -399,7 +399,7 @@ export class GpuViewPanel {
         await this.mapWithConcurrency(
             queryHosts,
             maxConcurrent,
-            host => this.queryHost(host, config, settings, metadata),
+            host => this.queryHost(host, config, settings, metadata,force),
             async (status, _index, completed) => {
                 results.set(status.host, status);
                 const now = Date.now();
@@ -422,7 +422,8 @@ export class GpuViewPanel {
         host: string,
         config: vscode.WorkspaceConfiguration,
         settings: ViewSettings,
-        metadata: Record<string, ServerMetadata>
+        metadata: Record<string, ServerMetadata>,
+        force=true
     ): Promise<ServerStatus> {
         const startedAt = Date.now();
         const timeoutSeconds = config.get<number>('sshTimeout', 8);
@@ -439,7 +440,7 @@ export class GpuViewPanel {
                 includeProcesses: includeOwners || settings.availabilityRequireNoProcesses,
                 includeHostHealth: settings.showHostHealth,
                 includeSlurm: shouldQuerySlurm
-            }, 0, this.monitor);
+            }, force?0:Math.min(2000,Math.max(2,config.get<number>('refreshInterval',5))*500), this.monitor);
             if (shouldQuerySlurm) {
                 this.lastSlurmQueryAt.set(host, Date.now());
                 if (snapshot.slurmAvailable) {
@@ -475,11 +476,15 @@ export class GpuViewPanel {
                 healthAvailable: snapshot.healthAvailable
             };
             this.lastSuccessful.set(host, status);
+            this.failedHosts.delete(host);
             GpuViewPanel.snapshotCache.set(host, status);
             return status;
         } catch (error) {
             const friendly = this.friendlyError(error);
             const previous = this.lastSuccessful.get(host) || GpuViewPanel.snapshotCache.get(host);
+            const attempts=(this.failedHosts.get(host)?.attempts||0)+1;
+            const nextRetryAt=Date.now()+Math.min(120000,Math.max(10000,config.get<number>('refreshInterval',5)*1000)*2**Math.min(attempts-1,8));
+            this.failedHosts.set(host,{attempts,nextRetryAt});
             return {
                 host,
                 gpus: previous?.gpus || [],
@@ -492,6 +497,7 @@ export class GpuViewPanel {
                 slurmAvailable: previous?.slurmAvailable,
                 healthAvailable: Boolean(previous?.health),
                 error: friendly.message,
+                nextRetryAt,
                 errorCategory: friendly.category
             };
         }
@@ -596,7 +602,7 @@ export class GpuViewPanel {
             preferences: Object.fromEntries(preferenceFields.map(field => [field.key, config.get(field.key, field.default)])),
             aiConfigured,
             summary,
-            refresh: { active: refreshing, completed, total }
+            refresh: { active: refreshing, completed, total,automatic:config.get<boolean>('autoRefresh',true),intervalSeconds:Math.max(2,config.get<number>('refreshInterval',5)) }
         });
     }
 
@@ -801,16 +807,15 @@ export class GpuViewPanel {
         </head>
         <body>
             <header class="toolbar">
-                <div><h1 id="page-title"></h1><span id="refresh-state" class="subtle"></span></div>
+                <div class="product-heading"><h1 id="page-title"></h1><div class="product-meta"><span id="refresh-state" class="subtle"></span><button id="refresh-mode" class="meta-button" type="button"></button></div></div>
                 <div class="toolbar-actions">
                     <button id="assistant-button" class="secondary-button"></button>
-                    <button id="language-button" class="secondary-button"></button>
                     <button id="settings-button" class="secondary-button"></button>
                     <button id="refresh-button"></button>
                 </div>
             </header>
             <section id="summary" class="summary-strip" aria-label="GPU summary"></section>
-            <section class="fleet-controls" aria-label="Fleet filters">
+            <section class="fleet-filter-panel" aria-label="Fleet filters"><div class="fleet-controls">
                 <input id="search-input" type="search" placeholder="Search servers, GPUs, users, commands, or Slurm jobs">
                 <select id="status-filter" aria-label="Status filter">
                     <option value="all"></option><option value="available"></option>
@@ -820,14 +825,11 @@ export class GpuViewPanel {
                     <option value="configured"></option><option value="freeMemory"></option>
                     <option value="utilization"></option><option value="temperature"></option>
                 </select>
-            </section>
-            <section class="resource-controls" aria-label="Resource requirements">
+            </div><div class="filter-secondary"><div class="resource-controls" aria-label="Resource requirements">
                 <label><span id="min-memory-label"></span><input id="min-memory" type="number" min="0" max="1048576" step="1" value="0"><span>GiB</span></label>
                 <label><span id="min-gpus-label"></span><input id="min-gpus" type="number" min="1" max="1024" step="1" value="1"></label>
-                <button id="my-tasks-button" class="secondary-button" type="button"></button>
-                <button id="reset-filters-button" class="text-button" type="button"></button>
-            </section>
-            <section id="user-filters" class="user-filters" aria-label="Active users"></section>
+            </div><div id="user-filters" class="user-filters" aria-label="Active users"></div>
+            <div class="filter-actions"><span id="filter-results" class="subtle"></span><button id="my-tasks-button" class="secondary-button" type="button"></button><button id="reset-filters-button" class="text-button" type="button" hidden></button></div></div></section>
             <div id="dashboard-layout" class="dashboard-layout">
                 <main id="content"><div class="empty-state"></div></main>
                 <aside id="gpu-details" class="gpu-details" aria-labelledby="gpu-details-title" hidden></aside>

@@ -10,10 +10,11 @@ const string={type:'string'};
 const tool=(name:string,description:string,properties:Record<string,unknown>,required:string[]=[]):AiTool=>({name,description,parameters:{type:'object',properties,required,additionalProperties:false}});
 const TOOLS:AiTool[]=[
     tool('get_fleet_status','Get fresh GPUs, owners, memory and availability in the current dashboard scope. Excludes configured hidden GPUs by default.',{servers:{type:'array',items:string}}),
-    tool('inspect_task','Trace a GPU PID to parent/launcher, working directory, related children and task log candidates. Use this to identify multiprocessing workers.',{server:string,pid:string},['server','pid']),
+    tool('inspect_task','Inspect a GPU task and its ancestry, arguments, working directories, stdout/stderr destinations, open-file/path metadata and related children. No file contents are read. Returns directories available for exploration.',{server:string,pid:string},['server','pid']),
     tool('inspect_job','Read Slurm job details/accounting, or the current SSH user queue if job is omitted. EndTime while running is not a training ETA.',{server:string,job:string},['server']),
     tool('inspect_host','Read two short GPU samples, host memory/load, root filesystem space, driver and GPU topology for bottleneck/resource questions.',{server:string,pid:string},['server']),
-    tool('read_task_log','Read the configured bounded tail of an explicitly authorized task log. Unapproved paths require user authorization in the conversation; never bypass it.',{server:string,path:string},['server','path']),
+    tool('list_task_files','List one observed task directory, returning child names, kinds, sizes and modification times, never contents. Choose what to explore from actual evidence. No filename/extension filter. Browse discovered subdirectories or page using nextOffset.',{server:string,path:string,offset:{type:'integer',minimum:0,maximum:100000}},['server','path']),
+    tool('read_task_log','Read bounded task text: logs, JSON/JSONL/CSV metrics, configs or scripts. Choose head for setup/config and tail (default) for recent output. Calling this tool requests inline exact-file approval if needed and automatically continues; lack of a grant is not a reason to stop investigating or ask the user to find a path. Binary formats are unsupported.',{server:string,path:string,view:{type:'string',enum:['head','tail']}},['server','path']),
     tool('manage_reminders','Create/list/cancel a reminder only as requested by the user. available requires GPU UUIDs. taskEnded requires a verified launcher PID or Slurm job. Time fields are ISO strings with timezone; default deadline 24h.',{
         action:{type:'string',enum:['create','list','cancel','update']},id:string,server:string,mode:{type:'string',enum:['available','taskEnded','at']},gpuIds:{type:'array',items:string},match:{type:'string',enum:['all','any']},pid:string,job:string,at:string,notBefore:string,expiresAt:string
     },['action'])
@@ -137,13 +138,13 @@ export class AiController implements vscode.Disposable {
         if(!schema) throw new Error('This tool is not allowed.');
         const properties=schema.parameters.properties as Record<string,unknown>;
         if(Object.keys(args).some(key=>!Object.prototype.hasOwnProperty.call(properties,key))) throw new Error('Unsupported tool argument.');
-        if(name==='manage_reminders') return this.tasks.manage(args);
+        if(name==='manage_reminders') return this.tasks.manage(args,signal);
         if(name==='get_fleet_status') {
             if(args.servers!==undefined&&(!Array.isArray(args.servers)||args.servers.some(id=>typeof id!=='string'))) throw new Error('Invalid server list.');
             const scopeHosts=this.getData().map(s=>serverId(s.host));
             const ids=(args.servers as string[]|undefined)|| (this.scope?[this.scope.server]:(scopeHosts.length?scopeHosts:undefined));
             ids?.forEach(id=>this.tasks.resolve(id));
-            const data=await this.tasks.fleet(ids);
+            const data=await this.tasks.fleet(ids,signal);
             const masks=vscode.workspace.getConfiguration('gpu-fleet-viewer').get<Record<string,string[]>>('visibleGpus',{});
             return JSON.parse(buildFleetContext(visibleFleet(data,masks),false));
         }
@@ -151,22 +152,24 @@ export class AiController implements vscode.Disposable {
         if(name==='inspect_task') return this.tasks.query(args.server,'process',{pid:args.pid},signal);
         if(name==='inspect_job') return this.tasks.query(args.server,'job',args.job===undefined?{}:{job:args.job},signal);
         if(name==='inspect_host') return this.tasks.query(args.server,'resources',args.pid===undefined?{}:{pid:args.pid},signal);
+        if(name==='list_task_files')return this.tasks.query(args.server,'files',{path:args.path,...(args.offset===undefined?{}:{offset:args.offset})},signal);
         if(name==='read_task_log') {
-            const readArgs={path:args.path,...this.tasks.logLimits()};
+            if(args.view!==undefined&&!['head','tail'].includes(String(args.view)))throw new Error('Invalid text view.');
+            const readArgs={path:args.path,...(args.view===undefined?{}:{view:args.view}),...this.tasks.logLimits()};
             let result=await this.tasks.query(args.server,'log',readArgs,signal);
             if(result.needsAuthorization){
-                const decision=await this.requestLogApproval(args.server,result.path,signal,operationId);
+                const decision=await this.requestLogApproval(args.server,result.path,signal,operationId,(args.view||'tail') as 'head'|'tail');
                 if(decision==='deny')return {denied:true,message:'User declined this log. Use other available evidence and do not ask again unless the user requests it.'};
                 if(decision==='remember')await this.tasks.authorize(args.server,result.path,true);
                 if(signal.aborted)throw new Error('Request cancelled.');
                 result=await this.tasks.query(args.server,'log',readArgs,signal,decision==='once');
             }
-            if(!result.needsAuthorization)await this.webview.postMessage({type:'taskProgress',host:this.tasks.resolve(args.server),path:args.path,progress:result.progress,modifiedAt:result.modifiedAt,collectedAt:result.collectedAt});
+            if(!result.needsAuthorization)await this.webview.postMessage({type:'taskProgress',host:this.tasks.resolve(args.server),path:args.path,modifiedAt:result.modifiedAt,collectedAt:result.collectedAt});
             return result;
         }
         throw new Error('Unsupported tool.');
     }
-    private async requestLogApproval(server:string,path:string,signal:AbortSignal,operationId?:string):Promise<'once'|'remember'|'deny'> {
+    private async requestLogApproval(server:string,path:string,signal:AbortSignal,operationId?:string,view:'head'|'tail'='tail'):Promise<'once'|'remember'|'deny'> {
         const id=randomUUID();
         if(signal.aborted)throw new Error('Request cancelled.');
         return new Promise((resolve,reject)=>{
@@ -180,7 +183,7 @@ export class AiController implements vscode.Disposable {
             const cancel=()=>finish();
             this.approval={id,server,path,resolve:decision=>finish(decision)};
             signal.addEventListener('abort',cancel,{once:true});
-            void this.webview.postMessage({type:'aiApproval',id,operationId,server,label:this.tasks.hosts().find(h=>h.id===server)?.label,path,
+            void this.webview.postMessage({type:'aiApproval',id,operationId,server,label:this.tasks.hosts().find(h=>h.id===server)?.label,path,view,
                 endpoint:aiEndpoint(this.configuration().protocol,this.configuration().baseUrl).host,maxLines:this.tasks.logLimits().lines,maxBytes:this.tasks.logLimits().maxBytes});
         });
     }
@@ -243,18 +246,20 @@ export class AiController implements vscode.Disposable {
                         result=await aiTurn({...options,apiKey,stream},conversation,context+(tools.length?'':'\nTool execution is unavailable in compatibility mode. Use cached facts/general GPU guidance and state this clearly.'),tools,active.signal,delta=>{
                             part+=delta;if(Date.now()-last>70){last=Date.now();void post({type:'aiDelta',answer:combined+part,html:renderMarkdown(combined+part)});}
                         },event=>{void post({type:'aiActivity',id:modelId,...event,state:'running',startedAt,endpoint:aiEndpoint(options.protocol,options.baseUrl).host,model:options.model});});
-                        await post({type:'aiActivity',id:modelId,state:'done',startedAt});
+                        await post({type:'aiActivity',id:modelId,state:'done',startedAt,text:result.text});
                     }catch(error){
                         await post({type:'aiActivity',id:modelId,state:active.signal.aborted?'cancelled':'error',startedAt,error:(error as Error).message});
                         if(!count&&tools.length&&[400,404,422].includes((error as any).status)){
-                            tools=[];stream=false;await post({type:'aiStep',id:'compatibility',name:'compatibility',state:'done',text:'API rejected this request. Retrying basic chat without tools or streaming. / API 未接受本轮请求，尝试不带工具和流式的兼容模式。'});continue;
+                            if(stream){stream=false;await post({type:'aiStep',id:'streamCompatibility',name:'compatibility',state:'done',text:'Retrying tool-enabled requests without streaming. / 尝试保留工具能力的非流式请求。'});continue;}
+                            tools=[];await post({type:'aiCapability',toolsAvailable:false,text:'This API/model rejected tool requests. This reply is basic chat only; it cannot inspect tasks or create reminders. / 当前 API 或模型拒绝了工具请求。本轮只能普通对话，无法查询任务或创建提醒。'});
+                            await post({type:'aiStep',id:'compatibility',name:'compatibility',state:'done',text:'Tool requests were rejected; basic chat only. / 工具请求未被接受，本轮仅普通对话。'});continue;
                         }
                         throw error;
                     }
                     combined+=result.text;
                     await post({type:'aiDelta',answer:combined,html:renderMarkdown(combined)});
                     conversation.push({role:'assistant',content:result.text,toolCalls:result.toolCalls});
-                    if(!result.toolCalls.length){this.history=conversation;await post({type:'aiResult',answer:combined,html:renderMarkdown(combined)});return;}
+                    if(!result.toolCalls.length){this.history=conversation;await post({type:'aiResult',answer:result.text,html:renderMarkdown(result.text)});return;}
                     if(!tools.length)throw new Error('The provider requested unavailable tools in basic chat mode.');
                     if(combined)combined+='\n\n';pending=result.toolCalls.slice();
                 }

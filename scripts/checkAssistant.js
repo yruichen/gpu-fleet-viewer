@@ -20,12 +20,28 @@ async function main(){
         assert.ok(args.includes('BatchMode=yes'));
         ssh.push(args);
         const remote=args.at(-1);
+        if(remote.includes('["files",')){
+            const nested=remote.includes('/work/experiment/arbitrary-run');
+            setImmediate(()=>callback(null,JSON.stringify({path:nested?'/work/experiment/arbitrary-run':'/work/experiment',entries:[nested?{path:'/work/experiment/arbitrary-run/state.metrics',kind:'file',size:123,modifiedAt:1}:{path:'/work/experiment/arbitrary-run',kind:'directory',size:0,modifiedAt:1}],nextOffset:null,contentsRead:false}),''));return {kill(){}};
+        }
+        if(remote.includes('["log",')&&remote.includes('state.metrics')){
+            setImmediate(()=>callback(null,JSON.stringify({path:'/work/experiment/arbitrary-run/state.metrics',text:'{"completed_batches":37,"planned_batches":80,"mean_seconds_per_batch":2.5}',modifiedAt:1}),''));return {kill(){}};
+        }
         const text=remote.includes('[\"log\",')?JSON.stringify({text:'2026-10-19T10:00:00Z step 100/1000\n2026-10-19T10:01:00Z step 200/1000\napi_key=synthetic-secret',modifiedAt:1,path:'/work/train.log'}):remote.startsWith('python3')?JSON.stringify({chain:[{pid:'42',ppid:'1',identity:'boot:42',user:'researcher',command:'python -c from multiprocessing.spawn import spawn_main; spawn_main() --multiprocessing-fork --api_key=synthetic-secret',cwd:'/work/experiment',elapsedSeconds:60,state:'R',logs:[]},{pid:'40',ppid:'1',identity:'boot:40',user:'researcher',command:'python train.py',cwd:'/work/experiment',elapsedSeconds:65,state:'R',logs:[]},{pid:'1',ppid:'0',identity:'boot:1',user:'root',command:'systemd',elapsedSeconds:100,state:'S',logs:[]}],children:[{pid:'99',ppid:'42',identity:'boot:99',user:'researcher',command:'data worker',elapsedSeconds:1,state:'R',logs:[]}],collectedAt:new Date().toISOString()}):'0, GPU-demo, Research GPU, 0, 0, 24576, 24576, 0, 30, 20, 200, 20\n__GPU_FLEET_PROCESSES__\nGPU-demo, 42, python, 10\n__GPU_FLEET_PROCESS_DETAILS__\n42 researcher 60 python train.py\n';
         if(holdQuery&&!remote.startsWith('python3'))heldQuery=()=>callback(null,text,'');else setImmediate(()=>callback(null,text,''));return {kill(){}};
     };
     const server=http.createServer((req,res)=>{
         let raw='';req.on('data',c=>raw+=c);req.on('end',()=>{
             const body=JSON.parse(raw);requests.push(body);
+            if(body.model==='discovery-model'){
+                const results=body.messages.filter(m=>m.role==='tool').map(m=>JSON.parse(m.content));
+                let call;
+                if(!results.length)call={name:'inspect_task',arguments:{server:require('../out/taskService').serverId('lab-node'),pid:'42'}};
+                else if(results.at(-1).chain)call={name:'list_task_files',arguments:{server:require('../out/taskService').serverId('lab-node'),path:results.at(-1).browsableDirectories[0]}};
+                else if(results.at(-1).entries){const entry=results.at(-1).entries[0];call={name:entry.kind==='directory'?'list_task_files':'read_task_log',arguments:{server:require('../out/taskService').serverId('lab-node'),path:entry.path}};}
+                const message=call?{content:'Investigating evidence before answering.',tool_calls:[{id:'discovery-'+results.length,type:'function',function:{name:call.name,arguments:JSON.stringify(call.arguments)}}]}:{content:results.at(-1).text};
+                res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}]}));return;
+            }
             if(body.model==='compaction-check'){
                 assert.ok(Buffer.byteLength(raw)<4*1024*1024,'Compacted history must fit the actual wire format.');
                 const anthropic=req.url.endsWith('/messages');
@@ -41,8 +57,8 @@ async function main(){
                 const message=hasResult?{content:'Log handled'}:{content:'',tool_calls:[{id:'log-approval',type:'function',function:{name:'read_task_log',arguments:JSON.stringify({server:'host-'+require('crypto').createHash('sha256').update('lab-node').digest('hex').slice(0,16),path:'/work/approval.log'})}}]};
                 res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}]}));return;
             }
-            if(body.model==='no-stream') {
-                if(body.stream){res.statusCode=422;res.end('{}');}else{assert.ok(!body.tools);res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:'Plain GPU chat works'}}]}));}
+            if(body.model==='no-stream'||body.model==='no-stream-tools') {
+                if(body.stream||(body.model==='no-stream'&&body.tools)){res.statusCode=422;res.end('{}');}else{assert.strictEqual(Boolean(body.tools),body.model==='no-stream-tools');res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:'Plain GPU chat works'}}]}));}
                 return;
             }
             const n=requests.length;
@@ -96,7 +112,8 @@ async function main(){
         assert.strictEqual(ssh.length,count,'An unauthorized log must never reach SSH.');
         await tasks.authorize(host,'/work/train.log',true);
         const log=await tasks.query(host,'log',{path:'/work/train.log'});
-        assert.strictEqual(log.progress.remainingSeconds,480);
+        assert.ok(log.text.includes('step 200/1000'));
+        assert.ok(!Object.hasOwn(log,'progress'),'Progress semantics must be interpreted from raw evidence by the model.');
         assert.ok(!log.text.includes('synthetic-secret'));
         const future=await tasks.manage({action:'create',server:host,mode:'at',at:Date.now()+10000,expiresAt:Date.now()+20000});
         const beforeFuture=ssh.length;
@@ -114,6 +131,19 @@ async function main(){
             assert.strictEqual(tasks.state().reminders.find(w=>w.id===future.id).status,'active');
         }finally{Date.now=originalNow;holdQuery=false;}
         await tasks.manage({action:'cancel',id:future.id});
+        const beforeUnknown=ssh.length;
+        await assert.rejects(tasks.query(host,'files',{path:'/unrelated/directory'}),/not been discovered/);
+        assert.strictEqual(ssh.length,beforeUnknown,'Unknown directories cannot be scanned through model-supplied paths.');
+        values['ai.model']='discovery-model';
+        const discovered=[];const discovery=new AiController(context,{postMessage:async m=>discovered.push(m)},()=>[],async()=>{});
+        const investigation=discovery.handle({command:'askAi',question:'Check progress using whatever evidence the task actually produces'});
+        for(let i=0;i<100&&!discovered.some(m=>m.type==='aiApproval');i++)await new Promise(resolve=>setTimeout(resolve,5));
+        const discoveredApproval=discovered.find(m=>m.type==='aiApproval');
+        assert.strictEqual(discoveredApproval?.path,'/work/experiment/arbitrary-run/state.metrics','Directory exploration must compose to a real observed file, without filename templates.');
+        await discovery.handle({command:'resolveAiApproval',id:discoveredApproval.id,decision:'once'});await investigation;
+        assert.ok(discovered.some(m=>m.type==='aiResult'&&m.answer?.includes('completed_batches')),'Raw non-step/epoch evidence must reach the model after authorization.');discovery.dispose();
+        assert.ok(!discovered.find(m=>m.type==='aiResult'&&m.answer)?.answer.includes('Investigating evidence'),'Final answers must not retain intermediate model commentary outside the collapsed operations.');
+        assert.ok(discovered.some(m=>m.type==='aiActivity'&&m.text?.includes('Investigating evidence')),'Intermediate commentary must remain available in the operation records.');
         values['ai.model']='long-run';
         const longMessages=[];const long=new AiController(context,{postMessage:async m=>longMessages.push(m)},()=>[],async()=>{});
         await long.handle({command:'askAi',question:'Investigate all tasks'});
@@ -165,10 +195,17 @@ async function main(){
         const fallbackMessages=[];const fallback=new AiController(context,{postMessage:async m=>fallbackMessages.push(m)},()=>[],async()=>{});
         const before=requests.length;
         await fallback.handle({command:'askAi',question:'GPU advice'});
-        assert.strictEqual(requests.length,before+2);
+        assert.strictEqual(requests.length,before+3);
         assert.strictEqual(requests.at(-1).stream,false,'Compatibility retry must disable streaming as well as tools.');
         assert.ok(fallbackMessages.some(m=>m.type==='aiResult'&&m.answer==='Plain GPU chat works'));
+        assert.ok(fallbackMessages.some(m=>m.type==='aiCapability'&&m.toolsAvailable===false),'Loss of investigation capability must be explicit.');
         fallback.dispose();
+        values['ai.model']='no-stream-tools';
+        const nonstreamMessages=[];const nonstream=new AiController(context,{postMessage:async m=>nonstreamMessages.push(m)},()=>[],async()=>{});
+        const beforeNonstream=requests.length;await nonstream.handle({command:'askAi',question:'GPU task question'});
+        assert.strictEqual(requests.length,beforeNonstream+2);
+        assert.ok(requests.at(-1).tools,'Turning off streaming must preserve tools before considering basic-chat fallback.');
+        assert.ok(!nonstreamMessages.some(m=>m.type==='aiCapability'));nonstream.dispose();
         const secondContext={...context,subscriptions:[]};
         const restored=TaskService.get(secondContext);
         assert.ok(restored.state().logs.some(log=>log.path==='/work/train.log'&&log.authorized),'Saved log grants must remain visible and revocable after restart.');
