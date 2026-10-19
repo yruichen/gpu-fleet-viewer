@@ -96,7 +96,7 @@ export class GpuViewPanel {
         this.context = context;
         this.host = host;
         this.onStatusUpdate = onStatusUpdate;
-        this.assistant = new AiController(context, panel.webview, () => this.lastData, () => this.publishCurrent());
+        this.assistant = new AiController(context, panel.webview, () => this.lastData, () => this.publishCurrent(),host===undefined?'fleet':'server:'+host);
         this.disposables.push(this.assistant);
         GpuViewPanel.panels.add(this);
         this.panel.webview.html = this.getWebviewContent();
@@ -248,6 +248,7 @@ export class GpuViewPanel {
     private async handleConfigurationChange(event: vscode.ConfigurationChangeEvent): Promise<void> {
         if (this.savingPreferences) return;
         if (this.affectsAny(event,['ai.protocol','ai.baseUrl','ai.model'])) this.assistant.reset();
+        if(event.affectsConfiguration('gpu-fleet-viewer.ai.saveChatHistory'))this.assistant.historySettingsChanged();
         if (this.affectsAny(event, AUTO_REFRESH_KEYS)) {
             this.scheduleAutoRefresh();
         }
@@ -277,6 +278,7 @@ export class GpuViewPanel {
                 for (const [key, value] of entries) await config.update(key, value, vscode.ConfigurationTarget.Global);
             } finally { this.savingPreferences = false; }
             if (entries.some(([key]) => ['ai.protocol','ai.baseUrl','ai.model'].includes(key))) this.assistant.reset();
+            if(entries.some(([key])=>key==='ai.saveChatHistory'))this.assistant.historySettingsChanged();
             if (entries.some(([key]) => key === 'sshConfigPath')) {
                 this.duplicateAliases.clear(); this.lastSuccessful.clear();this.failedHosts.clear(); GpuViewPanel.snapshotCache.clear();
             }

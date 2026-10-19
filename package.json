@@ -12,7 +12,7 @@
 	},
 	"author": "yruichen",
 	"license": "Apache-2.0",
-	"version": "1.4.2",
+	"version": "1.4.3",
 	"icon": "resources/icon.png",
 	"publisher": "yruichen",
 	"pricing": "Free",
@@ -358,6 +358,12 @@
 					"type": "string",
 					"default": "",
 					"description": "Model ID supplied by your AI provider.",
+					"scope": "application"
+				},
+				"gpu-fleet-viewer.ai.saveChatHistory": {
+					"type": "boolean",
+					"default": false,
+					"description": "Save conversation text in local VS Code storage. Tool evidence and Full Access permissions are not persisted.",
 					"scope": "application"
 				},
 				"gpu-fleet-viewer.ai.timeoutSeconds": {

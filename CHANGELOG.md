@@ -2,6 +2,14 @@
 
 All notable changes to GPU Fleet Viewer are documented here.
 
+## 1.4.3 - 2026-10-19
+
+- Replace the authorization sidebar with separate conversations: new, switch, rename and delete, with isolated context, drafts, task scope and permission mode.
+- Move permissions beside the input: confirm each file read, or Full Access for automatic reading of discovered task files through existing read-only tools; remove stored per-file grants.
+- Cancel pending automatic reads when returning to confirmation mode, invalidate approvals when switching chats, and preserve interrupted work in its original conversation.
+- Offer optional local conversation-text history, disabled by default; omit tool evidence and permissions, restore with confirmation required, and clear all panel copies when disabled.
+- Preserve prefilled GPU questions on first opening and keep dashboard and server-panel chat storage separate.
+
 ## 1.4.2 - 2026-10-19
 
 - Let the model explore observed task directories and open-file/path metadata, then request authorized head/tail text from actual files, without filename templates or question routing rules.

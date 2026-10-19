@@ -27,7 +27,7 @@ async function main(){
         if(remote.includes('["log",')&&remote.includes('state.metrics')){
             setImmediate(()=>callback(null,JSON.stringify({path:'/work/experiment/arbitrary-run/state.metrics',text:'{"completed_batches":37,"planned_batches":80,"mean_seconds_per_batch":2.5}',modifiedAt:1}),''));return {kill(){}};
         }
-        const text=remote.includes('[\"log\",')?JSON.stringify({text:'2026-10-19T10:00:00Z step 100/1000\n2026-10-19T10:01:00Z step 200/1000\napi_key=synthetic-secret',modifiedAt:1,path:'/work/train.log'}):remote.startsWith('python3')?JSON.stringify({chain:[{pid:'42',ppid:'1',identity:'boot:42',user:'researcher',command:'python -c from multiprocessing.spawn import spawn_main; spawn_main() --multiprocessing-fork --api_key=synthetic-secret',cwd:'/work/experiment',elapsedSeconds:60,state:'R',logs:[]},{pid:'40',ppid:'1',identity:'boot:40',user:'researcher',command:'python train.py',cwd:'/work/experiment',elapsedSeconds:65,state:'R',logs:[]},{pid:'1',ppid:'0',identity:'boot:1',user:'root',command:'systemd',elapsedSeconds:100,state:'S',logs:[]}],children:[{pid:'99',ppid:'42',identity:'boot:99',user:'researcher',command:'data worker',elapsedSeconds:1,state:'R',logs:[]}],collectedAt:new Date().toISOString()}):'0, GPU-demo, Research GPU, 0, 0, 24576, 24576, 0, 30, 20, 200, 20\n__GPU_FLEET_PROCESSES__\nGPU-demo, 42, python, 10\n__GPU_FLEET_PROCESS_DETAILS__\n42 researcher 60 python train.py\n';
+        const text=remote.includes('[\"log\",')?JSON.stringify({text:'2026-10-19T10:00:00Z step 100/1000\n2026-10-19T10:01:00Z step 200/1000\napi_key=synthetic-secret',modifiedAt:1,path:'/work/train.log'}):remote.startsWith('python3')?JSON.stringify({chain:[{pid:'42',ppid:'1',identity:'boot:42',user:'researcher',command:'python -c from multiprocessing.spawn import spawn_main; spawn_main() --multiprocessing-fork --api_key=synthetic-secret',cwd:'/work/experiment',elapsedSeconds:60,state:'R',logs:['/work/approval.log','/work/full.log']},{pid:'40',ppid:'1',identity:'boot:40',user:'researcher',command:'python train.py',cwd:'/work/experiment',elapsedSeconds:65,state:'R',logs:[]},{pid:'1',ppid:'0',identity:'boot:1',user:'root',command:'systemd',elapsedSeconds:100,state:'S',logs:[]}],children:[{pid:'99',ppid:'42',identity:'boot:99',user:'researcher',command:'data worker',elapsedSeconds:1,state:'R',logs:[]}],collectedAt:new Date().toISOString()}):'0, GPU-demo, Research GPU, 0, 0, 24576, 24576, 0, 30, 20, 200, 20\n__GPU_FLEET_PROCESSES__\nGPU-demo, 42, python, 10\n__GPU_FLEET_PROCESS_DETAILS__\n42 researcher 60 python train.py\n';
         if(holdQuery&&!remote.startsWith('python3'))heldQuery=()=>callback(null,text,'');else setImmediate(()=>callback(null,text,''));return {kill(){}};
     };
     const server=http.createServer((req,res)=>{
@@ -71,7 +71,7 @@ async function main(){
         });
     });
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));baseUrl='http://127.0.0.1:'+server.address().port;
-    const context={subscriptions:[],globalState:{get:(key,fallback)=>state.has(key)?state.get(key):fallback,update:async(key,value)=>state.set(key,JSON.parse(JSON.stringify(value)))},secrets:{get:async()=>'dummy-key'}};
+    const context={subscriptions:[],globalState:{keys:()=>[...state.keys()],get:(key,fallback)=>state.has(key)?state.get(key):fallback,update:async(key,value)=>state.set(key,JSON.parse(JSON.stringify(value)))},secrets:{get:async()=>'dummy-key'}};
     const controller=new AiController(context,{postMessage:async m=>messages.push(m)},()=>[],async()=>{});
     try{
         await controller.handle({command:'askAi',question:'What is running? Trace it and notify me when this task ends.'});
@@ -110,8 +110,8 @@ async function main(){
         const denied=await tasks.query(host,'log',{path:'/work/train.log'});
         assert.strictEqual(denied.needsAuthorization,true);
         assert.strictEqual(ssh.length,count,'An unauthorized log must never reach SSH.');
-        await tasks.authorize(host,'/work/train.log',true);
-        const log=await tasks.query(host,'log',{path:'/work/train.log'});
+        await assert.rejects(tasks.query(host,'log',{path:'/work/train.log'},undefined,true),/Invalid file permission/);
+        const log=await tasks.query(host,'log',{path:'/work/train.log'},undefined,'once');
         assert.ok(log.text.includes('step 200/1000'));
         assert.ok(!Object.hasOwn(log,'progress'),'Progress semantics must be interpreted from raw evidence by the model.');
         assert.ok(!log.text.includes('synthetic-secret'));
@@ -165,10 +165,10 @@ async function main(){
         assert.strictEqual(ssh.length,beforeGrant,'Unmatched approvals cannot authorize a read.');
         await withApproval.handle({command:'resolveAiApproval',id:approval.id,decision:'once'});await pending;
         assert.ok(ssh.length>beforeGrant,'Allow must automatically resume the suspended tool.');
-        assert.ok(!TaskService.get(context).state().logs.find(l=>l.path==='/work/approval.log')?.authorized,'Allow once must not persist a grant.');
+        assert.strictEqual((await tasks.query(host,'log',{path:'/work/approval.log'})).needsAuthorization,true,'Allow once must not authorize later reads.');
         assert.ok(approvalMessages.some(m=>m.type==='aiResult'&&m.answer==='Log handled'));
         withApproval.dispose();
-        for(const decision of ['deny','cancel','remember']){
+        for(const decision of ['deny','cancel','full']){
             const events=[];const candidate=new AiController(context,{postMessage:async m=>events.push(m)},()=>[],async()=>{});
             const task=candidate.handle({command:'askAi',question:'Read this task log'});
             for(let i=0;i<100&&!events.some(m=>m.type==='aiApproval');i++)await new Promise(resolve=>setTimeout(resolve,5));
@@ -176,10 +176,22 @@ async function main(){
             const queries=ssh.length;
             if(decision==='cancel'){
                 await candidate.handle({command:'cancelAi'});await task;
-                await candidate.handle({command:'resolveAiApproval',id:request.id,decision:'remember'});
+                await candidate.handle({command:'resolveAiApproval',id:request.id,decision:'once'});
+            }else if(decision==='full'){
+                await candidate.handle({command:'setAiPermissionMode',sessionId:events.findLast(m=>m.type==='aiState').activeId,mode:'full'});await task;
             }else{await candidate.handle({command:'resolveAiApproval',id:request.id,decision});await task;}
-            if(decision!=='remember')assert.strictEqual(ssh.length,queries,'Declining/cancelling must not read the log.');
-            else assert.ok(TaskService.get(context).state().logs.find(l=>l.path==='/work/approval.log')?.authorized);
+            if(decision!=='full')assert.strictEqual(ssh.length,queries,'Declining/cancelling must not read the log.');
+            else {
+                const beforeFullRead=ssh.length,approvals=events.filter(m=>m.type==='aiApproval').length;
+                await candidate.execute('read_task_log',{server:host,path:'/work/full.log'},new AbortController().signal);
+                assert.strictEqual(ssh.length,beforeFullRead+1,'Full Access must execute subsequent safe reads without another approval.');
+                assert.strictEqual(events.filter(m=>m.type==='aiApproval').length,approvals);
+                await assert.rejects(candidate.execute('read_task_log',{server:host,path:'/work/.env'},new AbortController().signal),/sensitive/i);
+                await assert.rejects(candidate.execute('read_task_log',{server:host,path:'/unobserved/file.log'},new AbortController().signal),/not been observed/);
+                await assert.rejects(candidate.execute('run_shell',{command:'kill 42'},new AbortController().signal),/not allowed/);
+                await candidate.handle({command:'setAiPermissionMode',sessionId:events.findLast(m=>m.type==='aiState').activeId,mode:'confirm'});
+                assert.strictEqual((await tasks.query(host,'log',{path:'/work/full.log'})).needsAuthorization,true);
+            }
             if(decision==='cancel'){
                 const resume=candidate.handle({command:'continueAi'});
                 for(let i=0;i<100&&!events.some(m=>m.type==='aiApproval'&&m.id!==request.id);i++)await new Promise(resolve=>setTimeout(resolve,5));
@@ -190,6 +202,39 @@ async function main(){
             }
             candidate.dispose();
         }
+
+
+        const raceEvents=[];const race=new AiController(context,{postMessage:async m=>raceEvents.push(m)},()=>[],async()=>{});
+        const raceTurn=race.handle({command:'askAi',question:'Read the task log'});
+        for(let i=0;i<100&&!raceEvents.some(m=>m.type==='aiApproval');i++)await new Promise(resolve=>setTimeout(resolve,5));
+        assert.ok(raceEvents.some(m=>m.type==='aiApproval'));
+        values.maxConcurrentHosts=1;
+        let releaseSlot;const blocker=tasks.runQuery(()=>new Promise(resolve=>{releaseSlot=resolve;}));
+        const beforeQueuedRead=ssh.length;
+        const raceId=raceEvents.findLast(m=>m.type==='aiState').activeId;
+        await race.handle({command:'setAiPermissionMode',sessionId:raceId,mode:'full'});
+        await new Promise(resolve=>setImmediate(resolve));
+        assert.strictEqual(tasks.queryWaiters.length,1,'Automatic read must be queued behind the shared SSH budget.');
+        await race.handle({command:'setAiPermissionMode',sessionId:raceId,mode:'confirm'});
+        await raceTurn;releaseSlot();await blocker;delete values.maxConcurrentHosts;
+        assert.strictEqual(ssh.length,beforeQueuedRead,'Downgrading must cancel an automatic read released by switching a pending approval to Full Access.');
+        race.dispose();
+
+        const switchingEvents=[];const switching=new AiController(context,{postMessage:async m=>switchingEvents.push(m)},()=>[],async()=>{});
+        const oldTurn=switching.handle({command:'askAi',question:'Inspect the original task'});
+        for(let i=0;i<100&&!switchingEvents.some(m=>m.type==='aiApproval');i++)await new Promise(resolve=>setTimeout(resolve,5));
+        const oldApproval=switchingEvents.find(m=>m.type==='aiApproval');assert.ok(oldApproval);
+        const oldId=switchingEvents.findLast(m=>m.type==='aiState').activeId;
+        const beforeSwitch=ssh.length;
+        await switching.handle({command:'newAiSession'});await oldTurn;
+        const newId=switchingEvents.findLast(m=>m.type==='aiSession').id;assert.notStrictEqual(newId,oldId);
+        await switching.handle({command:'resolveAiApproval',id:oldApproval.id,decision:'once'});
+        await switching.handle({command:'setAiPermissionMode',sessionId:oldId,mode:'full'});
+        assert.strictEqual(switchingEvents.findLast(m=>m.type==='aiState').permissionMode,'confirm','Stale permission events cannot grant access to another chat.');
+        assert.strictEqual(ssh.length,beforeSwitch,'Switching chats must cancel pending reads and invalidate approval tokens.');
+        assert.deepStrictEqual(switchingEvents.findLast(m=>m.type==='aiSession').messages,[]);
+        await switching.handle({command:'switchAiSession',id:oldId});
+        assert.ok(switchingEvents.findLast(m=>m.type==='aiSession').canContinue,'Interrupted investigation must stay attached to its original chat.');switching.dispose();
 
         values['ai.model']='no-stream';
         const fallbackMessages=[];const fallback=new AiController(context,{postMessage:async m=>fallbackMessages.push(m)},()=>[],async()=>{});
@@ -206,12 +251,39 @@ async function main(){
         assert.strictEqual(requests.length,beforeNonstream+2);
         assert.ok(requests.at(-1).tools,'Turning off streaming must preserve tools before considering basic-chat fallback.');
         assert.ok(!nonstreamMessages.some(m=>m.type==='aiCapability'));nonstream.dispose();
-        const secondContext={...context,subscriptions:[]};
-        const restored=TaskService.get(secondContext);
-        assert.ok(restored.state().logs.some(log=>log.path==='/work/train.log'&&log.authorized),'Saved log grants must remain visible and revocable after restart.');
-        await restored.authorize(host,'/work/train.log',false);
-        assert.ok(!restored.state().logs.some(log=>log.path==='/work/train.log'&&log.authorized));
-        secondContext.subscriptions.forEach(d=>d.dispose());
+        values['ai.saveChatHistory']=true;
+        const sessionEvents=[];const chats=new AiController(context,{postMessage:async m=>sessionEvents.push(m)},()=>[],async()=>{});
+        await chats.handle({command:'askAi',question:'Remember the first task'});
+        const first=sessionEvents.findLast(m=>m.type==='aiState').activeId;
+        await chats.handle({command:'setAiPermissionMode',sessionId:first,mode:'full'});
+        await chats.handle({command:'newAiSession',draft:'unfinished task question'});
+        const second=sessionEvents.findLast(m=>m.type==='aiSession');
+        assert.notStrictEqual(second.id,first);assert.strictEqual(second.permissionMode,'confirm');
+        await chats.handle({command:'askAi',question:'A separate investigation'});
+        assert.ok(!JSON.stringify(requests.at(-1).messages).includes('Remember the first task'),'New chats must not share model history.');
+        await chats.handle({command:'switchAiSession',id:first,draft:'second draft'});
+        const returned=sessionEvents.findLast(m=>m.type==='aiSession');
+        assert.strictEqual(returned.draft,'unfinished task question');assert.strictEqual(returned.permissionMode,'full');
+        assert.ok(returned.messages.some(m=>m.content==='Remember the first task'));
+        await chats.handle({command:'renameAiSession',id:first,title:'Training progress'});
+        assert.strictEqual(sessionEvents.findLast(m=>m.type==='aiState').sessions.find(s=>s.id===first).title,'Training progress');
+        await chats.handle({command:'deleteAiSession',id:second.id});
+        assert.ok(!sessionEvents.findLast(m=>m.type==='aiState').sessions.some(s=>s.id===second.id));
+        chats.dispose();await chats.storageWrite;
+        const saved=state.get(chats.storageKey());assert.ok(saved.some(s=>s.id===first));
+        const {restoreChatSessions}=require('../out/chatSessions');
+        assert.deepStrictEqual(restoreChatSessions({}),[]);
+        assert.strictEqual(restoreChatSessions([...saved,...saved,{id:'invalid id'}]).length,saved.length,'Malformed or duplicate stored sessions must be ignored.');
+        assert.ok(saved.every(s=>!('permissionMode'in s)&&!('history'in s)&&!('continuation'in s)),'Local storage must exclude Full Access, tool evidence and pending work.');
+        const restoredEvents=[];const restored=new AiController(context,{postMessage:async m=>restoredEvents.push(m)},()=>[],async()=>{});
+        await restored.handle({command:'aiState',load:true});
+        assert.strictEqual(restoredEvents.findLast(m=>m.type==='aiSession').permissionMode,'confirm');
+        assert.ok(restoredEvents.findLast(m=>m.type==='aiSession').messages.some(m=>m.content==='Remember the first task'));
+        values['ai.model']='other-provider-model';restored.reset();await restored.handle({command:'aiState',load:true});
+        assert.strictEqual(restoredEvents.findLast(m=>m.type==='aiSession').messages.length,0,'Changing model/provider must not replay another provider conversation.');
+        state.set('gpu-fleet-viewer.chatSessions.closed-panel',[{messages:[{role:'user',content:'closed panel text'}]}]);
+        values['ai.saveChatHistory']=false;restored.historySettingsChanged();await restored.storageWrite;
+        assert.deepStrictEqual(state.get(restored.storageKey()),[]);assert.deepStrictEqual(state.get('gpu-fleet-viewer.chatSessions.closed-panel'),[],'Disabling history must clear closed-panel copies too.');restored.dispose();await restored.storageWrite;
         console.log('Assistant tool orchestration, actual monitor parsing, command redaction, persistent reminders and panel-independent lifetime passed.');
     }finally{
         controller.dispose();context.subscriptions.forEach(d=>d.dispose());

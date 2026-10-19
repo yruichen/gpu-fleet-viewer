@@ -1,18 +1,19 @@
 export function getAssistantHtml(): string {
     return `<dialog id="assistant-dialog" class="app-dialog assistant-dialog" aria-labelledby="assistant-title">
         <header class="dialog-header"><h2 id="assistant-title"></h2><button id="assistant-sidebar-toggle" class="secondary-button" type="button" aria-expanded="false"></button><div class="dialog-actions"><button id="assistant-clear" class="secondary-button" type="button"></button><button id="assistant-settings" class="secondary-button" type="button"></button><button id="assistant-close" class="secondary-button" type="button"></button></div></header>
-        <div class="assistant-layout"><div class="assistant-chat">
+        <div class="assistant-layout"><aside class="assistant-sidebar" aria-label="Conversations">
+            <button id="assistant-new-session" class="secondary-button" type="button"></button>
+            <h3 id="assistant-sessions-title"></h3><div id="assistant-sessions"></div><p id="assistant-history-note" class="subtle"></p>
+            <details class="assistant-reminders-section"><summary id="assistant-reminders-title"></summary><p id="assistant-reminder-help" class="subtle"></p><div id="assistant-reminders"></div></details>
+        </aside><div class="assistant-chat">
+            <div class="assistant-scopebar"><label for="assistant-server" id="assistant-server-label" class="subtle"></label><select id="assistant-server"></select><span id="assistant-privacy" class="subtle"></span></div>
             <div id="assistant-messages" class="assistant-messages" role="log" aria-label="Conversation"></div>
             <form id="assistant-form" class="assistant-form">
                 <label for="assistant-prompt" id="assistant-prompt-label" class="subtle"></label>
                 <textarea id="assistant-prompt" rows="3" maxlength="32000" required></textarea>
-                <footer class="assistant-footer"><span id="assistant-status" role="status"></span><div class="dialog-actions"><button id="assistant-cancel" type="button" class="secondary-button" hidden></button><button id="assistant-send" type="submit"></button></div></footer>
+                <div id="assistant-status" role="status"></div><footer class="assistant-footer"><label class="assistant-permission"><span id="assistant-permission-label"></span><select id="assistant-permission-mode"><option value="confirm"></option><option value="full"></option></select></label><div class="dialog-actions"><button id="assistant-cancel" type="button" class="secondary-button" hidden></button><button id="assistant-send" type="submit"></button></div></footer><span id="assistant-permission-help" class="subtle"></span>
             </form>
-        </div><aside class="assistant-sidebar" aria-label="Task context and reminders">
-            <details class="assistant-context-section" open><summary id="assistant-context-title"></summary><label for="assistant-server" class="subtle" id="assistant-server-label"></label><select id="assistant-server"></select><div id="assistant-scope" class="subtle"></div><p id="assistant-privacy" class="subtle"></p><div id="assistant-context-data"></div></details>
-            <section><h3 id="assistant-reminders-title"></h3><p id="assistant-reminder-help" class="subtle"></p><div id="assistant-reminders"></div></section>
-            <section><h3 id="assistant-logs-title"></h3><div id="assistant-logs"></div><button id="assistant-add-log" class="text-button" type="button"></button></section>
-        </aside></div>
+        </div></div>
     </dialog>`;
 }
 export function getAssistantScript(): string {
@@ -28,21 +29,22 @@ export function getAssistantScript(): string {
             const tr=(en,zh)=>language==='zh-CN'?zh:en;
             let timer,requestAt=0,currentActivity,resumeButton,lastOutcome='';
             let activity=new Map();const approvalCards=new Map();
-            let busy=false,configured=false,currentReply,lastQuestion='',compatibilityWarning='',state={servers:[],reminders:[],logs:[]},selection;
-            function controls(){send.disabled=busy||!configured;cancel.hidden=!busy;clear.disabled=busy;send.setAttribute('aria-busy',String(busy));}
+            let busy=false,configured=false,currentReply,lastQuestion='',compatibilityWarning='',state={servers:[],reminders:[],sessions:[]},selection,sessionsSignature='',loaded=false,navigating=false;
+            function controls(){send.disabled=busy||navigating||!configured;cancel.hidden=!busy;clear.disabled=busy||navigating;prompt.disabled=navigating;document.getElementById('assistant-server').disabled=navigating;document.getElementById('assistant-permission-mode').disabled=navigating||!state.activeId;send.setAttribute('aria-busy',String(busy||navigating));}
             function labels(){
                 document.getElementById('assistant-title').textContent=t('assistant');
                 document.getElementById('assistant-prompt-label').textContent=tr('Enter to send · Shift+Enter for a new line','Enter 发送 · Shift+Enter 换行');
                 prompt.placeholder=tr('Ask about GPUs, task progress, errors or reminders…','询问 GPU、任务进度、异常，或设置提醒…');
                 for(const [id,name,label] of [['assistant-settings','settings-2',t('settings')],['assistant-close','x',t('close')],['assistant-clear','trash-2',t('clearChat')],['assistant-send','send',t('sendQuestion')]])document.getElementById(id).replaceChildren(icon(name),document.createTextNode(label));
                 cancel.textContent=t('cancelRequest');
-                document.getElementById('assistant-sidebar-toggle').textContent=tr('Context','上下文');
+                document.getElementById('assistant-sidebar-toggle').textContent=tr('Chats','会话');
+                document.getElementById('assistant-new-session').textContent=tr('+ New chat','+ 新对话');
+                document.getElementById('assistant-sessions-title').textContent=tr('Conversations','聊天会话');
                 document.getElementById('assistant-server-label').textContent=tr('Conversation scope','对话范围');
-                document.getElementById('assistant-context-title').textContent=tr('Current context','当前上下文');
-                document.getElementById('assistant-reminders-title').textContent=tr('Reminders','我的提醒');
+                document.getElementById('assistant-permission-label').textContent=tr('Permissions','权限');
+                document.querySelector('#assistant-permission-mode option[value=confirm]').textContent=tr('Confirm each read','人工确认');
+                document.querySelector('#assistant-permission-mode option[value=full]').textContent=tr('Full Access · read-only','Full Access · 只读');
                 document.getElementById('assistant-reminder-help').textContent=tr('Runs while desktop VS Code is awake.','需要本机 VS Code 运行且电脑未休眠。');
-                document.getElementById('assistant-logs-title').textContent=tr('Task logs','任务日志');
-                document.getElementById('assistant-add-log').textContent=tr('Authorize a log path…','授权日志路径…');
                 if(!busy)setStatus(lastOutcome||(configured?t('aiReady'):t('configureAiFirst')));
                 controls();renderState();
             }
@@ -149,14 +151,14 @@ export function getAssistantScript(): string {
                 card.append(node('strong','',tr('Read task file','读取任务文件')),node('span','subtle block',message.label||message.server),node('code','block',message.path),
                     node('p','subtle',(message.view==='head'?tr('Read the beginning, up to ','读取开头，最多 '):tr('Read the tail, up to ','读取末尾，最多 '))+message.maxLines+tr(' lines / ',' 行 / ')+Math.round(message.maxBytes/1024)+' KiB'+tr(', sent to ', '，发送至 ')+message.endpoint));
                 const actions=node('div','dialog-actions');
-                for(const [decision,label] of [['once',tr('Allow once and continue','允许本次并继续')],['remember',tr('Always allow this file','始终允许此文件')],['deny',tr('Decline','拒绝')]]){
+                for(const [decision,label] of [['once',tr('Allow once and continue','允许本次并继续')],['deny',tr('Decline','拒绝')]]){
                     actions.append(button(label,decision==='once'?'':'secondary-button',()=>{for(const b of actions.querySelectorAll('button'))b.disabled=true;vscode.postMessage({command:'resolveAiApproval',id:message.id,decision});}));
                 }
                 card.append(actions);currentReply.parentElement.querySelector('.chat-activity').append(card);approvalCards.set(message.id,{card,actions});
                 messages.scrollTop=messages.scrollHeight;
             }
             function startTurn(question,continuing=false){
-                if(busy||!configured)return;
+                if(busy||navigating||!configured)return;
                 if(resumeButton)resumeButton.disabled=true;
                 compatibilityWarning='';lastQuestion=question;entry('user',continuing?tr('Continue investigation','继续查询'):question);currentReply=entry('assistant','');
                 messages.scrollTop=messages.scrollHeight;prompt.value='';busy=true;cancel.disabled=false;controls();beginActivity();
@@ -173,17 +175,15 @@ export function getAssistantScript(): string {
                 const options=document.createDocumentFragment();const all=node('option','',tr('Dashboard scope','仪表盘范围'));all.value='';options.append(all);
                 for(const server of state.servers){const option=node('option','',server.label);option.value=server.id;options.append(option);}
                 patchChildren(serverSelect,options);serverSelect.value=state.scope?.server||'';
-                const scope=document.getElementById('assistant-scope');
                 const selected=state.servers.find(s=>s.id===state.scope?.server);
-                scope.textContent=selected?selected.label+(state.scope.uuid?' · '+state.scope.uuid:'')+(state.scope.pid?' · PID '+state.scope.pid:''):tr('Visible dashboard GPUs','仪表盘中显示的 GPU');
+                serverSelect.title=selected?selected.label+(state.scope.uuid?' · '+state.scope.uuid:'')+(state.scope.pid?' · PID '+state.scope.pid:''):tr('Visible dashboard GPUs','仪表盘中显示的 GPU');
                 document.getElementById('assistant-privacy').textContent=tr('Local SSH · Data is sent to ','本机 SSH · 提问时数据发送至 ')+(state.endpoint||tr('your API','所配 API'));
-                const data=document.getElementById('assistant-context-data');const contextFragment=document.createDocumentFragment();
-                for(const server of currentMessage?.data||[]) {
-                    const line=node('div','context-server');line.dataset.key=server.host;
-                    line.append(node('strong','',server.metadata?.alias||server.host),node('span','subtle block',server.error?tr('Offline / unknown','离线 / 状态未知'):server.gpus.filter(g=>g.availability.available).length+'/'+server.gpus.length+tr(' GPUs available',' 张可用')),
-                        node('span','subtle block',new Date(server.lastSuccessAt||server.collectedAt).toLocaleTimeString()+(server.stale?' · '+tr('stale','旧数据'):'')));contextFragment.append(line);
-                }
-                patchChildren(data,contextFragment);
+                document.getElementById('assistant-permission-mode').value=state.permissionMode||'confirm';
+                document.getElementById('assistant-permission-mode').dataset.mode=state.permissionMode||'confirm';
+                document.getElementById('assistant-permission-help').textContent=state.permissionMode==='full'?tr('Automatically reads discovered task files and sends text to your API. Read-only tools and sensitive-path protection still apply.','自动读取已发现的任务文件并发送至所配 API；仍受只读工具和敏感路径保护。'):tr('Each task-file read requires your approval.','每次读取任务文件前，由你确认。');
+                document.getElementById('assistant-history-note').textContent=state.savedHistory?tr('Conversation text saved locally. Restored with confirmation required.','聊天正文保存在本机；恢复后使用人工确认。'):tr('Window-only chats. Enable local history in Settings → AI.','会话仅保留在当前窗口，可在设置 → AI 中开启本机保存。');
+                document.getElementById('assistant-reminders-title').textContent=tr('Reminders','我的提醒')+' · '+state.reminders.filter(w=>w.status==='active').length;
+                renderSessions();
                 const watches=document.createDocumentFragment();
                 for(const watch of state.reminders.filter(w=>w.status==='active')) {
                     const box=node('div','assistant-watch');box.dataset.key=watch.id;
@@ -200,32 +200,46 @@ export function getAssistantScript(): string {
                 }
                 if(!watches.childNodes.length)watches.append(node('p','subtle',tr('No active reminders. Ask in chat or use a GPU’s reminder action.','暂无提醒。可在对话中提出，或从 GPU 详情中设置。')));
                 patchChildren(document.getElementById('assistant-reminders'),watches);
-                const logs=document.createDocumentFragment();
-                for(const log of state.logs){
-                    const row=node('div','assistant-log');row.dataset.key=log.server+':'+log.path;row.append(node('code','',log.path));
-                    row.append(button(log.authorized?tr('Revoke','撤销授权'):tr('Always allow this file','始终允许此文件'),'text-button',()=>vscode.postMessage({command:'authorizeTaskLog',server:log.server,path:log.path,revoke:log.authorized})));logs.append(row);
+            }
+            function renderSessions(){
+                const signature=JSON.stringify([state.sessions,state.activeId,language]);if(signature===sessionsSignature)return;sessionsSignature=signature;
+                const root=document.getElementById('assistant-sessions'),fragment=document.createDocumentFragment();
+                for(const session of state.sessions||[]){
+                    const row=node('div','assistant-session');row.dataset.key=session.id;
+                    const select=button(session.title||tr('New chat','新对话'),'session-select',()=>navigate('switchAiSession',session.id));select.setAttribute('aria-pressed',String(session.id===state.activeId));select.title=tr('Switching stops the current reply. Completed work is kept.','切换会停止当前回答，保留已完成的内容。');
+                    const menu=node('details','session-menu');menu.id='session-menu-'+session.id;menu.open=Boolean(document.getElementById(menu.id)?.open);
+                    const toggle=node('summary','', '⋯');toggle.setAttribute('aria-label',tr('Manage conversation','管理会话'));menu.append(toggle);
+                    const actions=node('div','session-menu-actions');const name=node('input');name.id='session-name-'+session.id;name.value=session.title;name.maxLength=80;name.setAttribute('aria-label',tr('Conversation title','会话名称'));
+                    actions.append(name,button(tr('Rename','重命名'),'secondary-button',()=>{const title=document.getElementById(name.id).value.trim();if(title)vscode.postMessage({command:'renameAiSession',id:session.id,title});}),button(tr('Delete','删除'),'text-button',()=>{
+                        const current=document.getElementById('session-delete-'+session.id);
+                        if(current.dataset.confirm==='yes')navigate('deleteAiSession',session.id);else {current.dataset.confirm='yes';current.textContent=tr('Confirm delete','确认删除');}
+                    }));actions.lastChild.id='session-delete-'+session.id;menu.append(actions);row.append(select,menu);fragment.append(row);
                 }
-                if(!logs.childNodes.length)logs.append(node('p','subtle',tr('Inspect a task to discover its log, or authorize a known path.','查询任务后可发现日志，也可授权已知路径。')));
-                patchChildren(document.getElementById('assistant-logs'),logs);
+                patchChildren(root,fragment);
+            }
+            function navigate(command,id){if(navigating)return;if(command!=='deleteAiSession'||id===state.activeId){navigating=true;controls();setStatus(tr('Switching conversation…','正在切换会话…'));}document.querySelector('.assistant-sidebar').classList.remove('mobile-open');document.getElementById('assistant-sidebar-toggle').setAttribute('aria-expanded','false');vscode.postMessage({command,id,draft:prompt.value});}
+            function resetDisplay(){clearInterval(timer);activity=new Map();approvalCards.clear();requestAt=0;lastOutcome='';statusTime.textContent='';messages.replaceChildren();currentReply=undefined;resumeButton=undefined;currentActivity=undefined;}
+            function loadSession(message){
+                const openingQuestion=!loaded?prompt.value:'';loaded=true;navigating=false;
+                busy=false;resetDisplay();selection=undefined;state.activeId=message.id;state.permissionMode=message.permissionMode;prompt.value=openingQuestion||message.draft||'';
+                for(const item of message.messages||[]){if(item.role==='assistant'){currentReply=entry('assistant','');answer({answer:item.content,html:item.html});currentReply=undefined;}else entry(item.role,item.content);}
+                lastQuestion=[...(message.messages||[])].reverse().find(m=>m.role==='user')?.content||'';
+                if(message.canContinue)continuationCard({});messages.scrollTop=messages.scrollHeight;controls();renderState();prompt.focus();
             }
             window.addEventListener('openAssistant',event=>{
                 selection=event.detail||selection;
                 if(selection?.question)prompt.value=selection.question;
                 labels();if(!dialog.open)openDialog(dialog);prompt.focus();
-                vscode.postMessage({command:'aiState',host:selection?.host,uuid:selection?.uuid,pid:selection?.pid});
+                if(!loaded){navigating=true;controls();}vscode.postMessage({command:'aiState',host:selection?.host,uuid:selection?.uuid,pid:selection?.pid,load:!loaded});
             });
             document.getElementById('assistant-sidebar-toggle').onclick=()=>{const open=document.querySelector('.assistant-sidebar').classList.toggle('mobile-open');document.getElementById('assistant-sidebar-toggle').setAttribute('aria-expanded',String(open));};
             document.getElementById('assistant-server').onchange=event=>{selection=undefined;vscode.postMessage({command:'aiState',scopeServer:event.target.value||null});};
             document.getElementById('assistant-close').onclick=()=>closeDialog(dialog);
             document.getElementById('assistant-settings').onclick=()=>{closeDialog(dialog);document.getElementById('preferences-dialog').addEventListener('close',()=>{labels();openDialog(dialog);prompt.focus();},{once:true});window.dispatchEvent(new CustomEvent('openPreferences',{detail:'ai'}));};
-            document.getElementById('assistant-add-log').onclick=()=>{
-                let server=state.scope?.server;
-                if(!server&&state.servers.length===1)server=state.servers[0].id;
-                if(!server){setStatus(tr('Open chat from the relevant GPU first to select its server.','请先从目标 GPU 的“问 AI”入口选择服务器。'));return;}
-                vscode.postMessage({command:'authorizeTaskLog',server});
-            };
+            document.getElementById('assistant-new-session').onclick=()=>navigate('newAiSession');
+            document.getElementById('assistant-permission-mode').onchange=event=>vscode.postMessage({command:'setAiPermissionMode',sessionId:state.activeId,mode:event.target.value});
             cancel.onclick=()=>{cancel.disabled=true;setStatus(tr('Cancelling…','正在取消…'));vscode.postMessage({command:'cancelAi'});};
-            clear.onclick=()=>{clearInterval(timer);activity=new Map();approvalCards.clear();requestAt=0;lastOutcome='';statusTime.textContent='';messages.replaceChildren();currentReply=undefined;resumeButton=undefined;vscode.postMessage({command:'clearAi'});};
+            clear.onclick=()=>navigate('clearAi');
             prompt.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&event.keyCode!==229){event.preventDefault();if(!busy)document.getElementById('assistant-form').requestSubmit();}});
             document.getElementById('assistant-form').onsubmit=event=>{
                 event.preventDefault();const question=prompt.value.trim();if(busy||!configured||!question)return;
@@ -235,7 +249,9 @@ export function getAssistantScript(): string {
             window.addEventListener('message',event=>{
                 const message=event.data;if(!message||typeof message!=='object')return;
                 if(message.type==='update'){configured=Boolean(message.aiConfigured&&message.preferences?.['ai.model']);if(dialog.open)labels();}
-                else if(message.type==='aiState'){state=message;renderState();}
+                else if(message.type==='aiState'){state=message;renderState();controls();}
+                else if(message.type==='aiSession')loadSession(message);
+                else if(message.type==='aiNavigationStart'){navigating=true;controls();setStatus(tr('Switching conversation…','正在切换会话…'));}
                 else if(message.type==='aiApproval')approvalCard(message);
                 else if(message.type==='aiApprovalResult'){const item=approvalCards.get(message.id);if(item){item.actions.replaceChildren(node('span','subtle',message.decision==='deny'?tr('Declined · continuing with other evidence','已拒绝，将使用其他证据'):message.decision==='cancelled'?tr('Cancelled','已取消'):tr('Allowed · continuing automatically','已允许，自动继续查询')));item.card.dataset.settled='true';approvalCards.delete(message.id);pruneActivity();}}
                 else if(message.type==='aiActivity')recordActivity(message);
@@ -258,7 +274,8 @@ export function getAssistantScript(): string {
                 } else if(message.type==='aiStep'){
                     if(message.name==='compatibility')compatibilityWarning=message.text;
                     recordActivity(message);
-                } else if(message.type==='aiNotice'){lastOutcome=message.error||message.text||'';setStatus(lastOutcome);}
+                } else if(message.type==='aiNavigationError'){navigating=false;controls();lastOutcome=message.error;setStatus(lastOutcome);}
+                else if(message.type==='aiNotice'){lastOutcome=message.error||message.text||'';setStatus(lastOutcome);}
                 else if(message.type==='aiReset'){busy=false;finishActivity('cancelled');activity=new Map();approvalCards.clear();lastOutcome='';requestAt=0;statusTime.textContent='';currentReply=undefined;resumeButton=undefined;messages.replaceChildren();labels();}
             });
         })();
@@ -270,11 +287,13 @@ export function getAssistantCss(): string {
         .assistant-dialog[open] { display: flex; flex-direction: column; }
         .assistant-dialog .dialog-header { flex: 0 0 auto; padding: 10px 14px; }
         #assistant-sidebar-toggle { display:none; }
-        #assistant-server { width:100%; font-size:11px; margin:5px 0 8px; }
+        #assistant-server { width:100%; min-width:0; font-size:11px; }
         .assistant-dialog .dialog-header .dialog-actions { gap: 4px; }
         .assistant-dialog .dialog-header button { font-size: 11px; min-height: 28px; }
-        .assistant-layout { display: grid; grid-template-columns: minmax(0,1fr) 200px; min-height: 0; flex: 1; }
+        .assistant-layout { display:grid; grid-template-columns:190px minmax(0,1fr); min-height:0; flex:1; }
         .assistant-chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+        .assistant-scopebar { display:grid; grid-template-columns:auto minmax(90px,150px); align-items:center; gap:5px 8px; padding:8px 14px; border-bottom:1px solid var(--vscode-widget-border); }
+        #assistant-privacy { grid-column:1/-1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .assistant-messages { overflow: auto; flex: 1; padding: 10px 18px; min-height: 120px; }
         .assistant-messages:empty::after { content: 'GPU Fleet'; display: block; margin-top: 18%; text-align: center; color: var(--vscode-descriptionForeground); font-size: 18px; opacity: .5; }
         .chat-entry { padding:16px 0; min-width:0; }
@@ -304,12 +323,28 @@ export function getAssistantCss(): string {
         .assistant-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
         .assistant-footer .dialog-actions { flex-shrink: 0; }
         #assistant-status { color: var(--vscode-descriptionForeground); overflow-wrap: anywhere; max-height: 45px; overflow: auto; }
-        .assistant-sidebar { border-left: 1px solid var(--vscode-widget-border); padding: 12px; overflow: auto; font-size: 11px; }
+        .assistant-sidebar { display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--vscode-widget-border); padding:12px 10px; overflow:auto; font-size:11px; background:var(--vscode-sideBar-background); }
+        #assistant-new-session { width:100%; margin-bottom:16px; text-align:left; }
+        #assistant-sessions { flex:1; min-height:90px; overflow:auto; }
+        .assistant-session { display:flex; align-items:center; gap:2px; border-radius:4px; }
+        .session-select { min-width:0; flex:1; padding:7px 8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; color:var(--vscode-descriptionForeground); background:transparent; }
+        .session-select:hover { background:var(--vscode-list-hoverBackground); }
+        .session-select[aria-pressed=true] { color:var(--vscode-foreground); background:var(--vscode-list-inactiveSelectionBackground,var(--vscode-button-secondaryBackground)); }
+        .session-menu { position:relative; flex-shrink:0; }
+        .session-menu > summary { cursor:pointer; padding:4px; list-style:none; font-size:16px; }
+        .session-menu-actions { position:absolute; z-index:3; top:100%; right:0; display:grid; gap:6px; width:160px; padding:8px; background:var(--vscode-editor-background); border:1px solid var(--vscode-widget-border); border-radius:5px; box-shadow:0 4px 12px var(--vscode-widget-shadow); }
+        .session-menu-actions input { min-width:0; width:100%; font-size:11px; }
+        #assistant-history-note { font-size:10px; line-height:1.6; padding:8px 0; }
+        .assistant-reminders-section { flex-shrink:0; max-height:190px; overflow:auto; }
+        .assistant-permission { display:flex; align-items:center; gap:6px; color:var(--vscode-descriptionForeground); }
+        #assistant-permission-mode { max-width:190px; font-size:11px; min-height:27px; }
+        #assistant-permission-mode[data-mode=full] { border-color:var(--vscode-editorWarning-foreground); }
+        #assistant-permission-help { font-size:10px; line-height:1.5; }
         .assistant-sidebar section,.assistant-sidebar > details { padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--vscode-widget-border); }
         .assistant-sidebar h3,.assistant-sidebar summary { font-size: 11px; font-weight: 600; margin: 0 0 8px; }
         .assistant-sidebar .subtle { line-height: 1.6; }
         .assistant-sidebar button { font-size: 10px; min-height: 24px; }
-        .context-server,.assistant-watch,.assistant-log { padding: 7px 0; overflow-wrap: anywhere; }
+        .assistant-watch { padding: 7px 0; overflow-wrap: anywhere; }
         .ai-continuation { padding:10px 0; border-top:1px solid var(--vscode-widget-border); font-size:12px; }
         .ai-approval { border:1px solid var(--vscode-widget-border); border-radius:5px; padding:12px; margin:6px 0; }
         .ai-approval code { margin:7px 0; overflow-wrap:anywhere; white-space:pre-wrap; }
@@ -336,6 +371,6 @@ export function getAssistantCss(): string {
         @keyframes activity-spin { to { transform:rotate(360deg); } }
         @media(prefers-reduced-motion:reduce) { .assistant-step[data-state=running] .step-indicator { animation:none; } }
         .assistant-step pre { max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 10px; }
-        @media(max-width:680px) { #assistant-sidebar-toggle { display:inline-flex; } .assistant-sidebar:not(.mobile-open) { display:none; } .assistant-layout { grid-template-columns: minmax(0,1fr); overflow: auto; } .assistant-chat { min-height: 320px; } .assistant-sidebar { border-left: 0; border-top: 1px solid var(--vscode-widget-border); } .assistant-context-section:not([open]) ~ section { display:none; } }
+        @media(max-width:680px) { #assistant-sidebar-toggle { display:inline-flex; } .assistant-sidebar:not(.mobile-open) { display:none; } .assistant-layout { grid-template-columns:minmax(0,1fr); overflow:auto; } .assistant-chat { min-height:320px; } .assistant-sidebar { max-height:240px; border-right:0; border-bottom:1px solid var(--vscode-widget-border); } .assistant-permission { gap:4px; } #assistant-permission-mode { max-width:155px; } }
     `;
 }

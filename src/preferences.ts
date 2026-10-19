@@ -46,6 +46,7 @@ export const preferenceFields: PreferenceField[] = [
     { key: 'ai.protocol', group: 'ai', label: ['API protocol', 'API 协议'], type: 'enum', options: ['openai', 'anthropic'], default: 'openai' },
     { key: 'ai.baseUrl', group: 'ai', label: ['API base URL or full endpoint', 'API 基础地址或完整接口地址'], type: 'string', default: 'https://api.openai.com/v1' },
     { key: 'ai.model', group: 'ai', label: ['Model ID (from your provider)', '模型 ID（由 API 服务商提供）'], type: 'string', default: '' },
+    { key: 'ai.saveChatHistory', group: 'ai', label: ['Save conversation text locally (turning off clears saved copies)', '保存聊天正文到本机（关闭会清除保存副本）'], type: 'boolean', default: false },
     { key: 'ai.maxToolCalls', group: 'ai', label: ['Tool calls per turn (0 = unlimited)', '每轮工具调用次数（0 = 不限）'], type: 'number', min: 0, max: 10000, default: 0 },
     { key: 'ai.logTailLines', group: 'ai', label: ['Task log tail (lines)', '任务日志末尾行数'], type: 'number', min: 20, max: 10000, default: 500 },
     { key: 'ai.logTailKiB', group: 'ai', label: ['Task log read limit (KiB)', '单次日志读取上限（KiB）'], type: 'number', min: 16, max: 2048, default: 256 },

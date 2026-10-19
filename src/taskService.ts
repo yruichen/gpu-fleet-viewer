@@ -10,7 +10,6 @@ import { createReminder, evaluateReminder, jobHasEnded, nextReminderDelay, GpuRe
 
 const instances = new WeakMap<vscode.ExtensionContext, TaskService>();
 const REMINDERS = 'gpu-fleet-viewer.reminders';
-const GRANTS = 'gpu-fleet-viewer.taskLogGrants';
 interface SnapshotQuery {promise:Promise<ServerSnapshot>;queue:AbortController;users:number;started:boolean;}
 export function serverId(host: string): string { return 'host-' + createHash('sha256').update(host).digest('hex').slice(0, 16); }
 export function visibleFleet(data: ServerStatus[], masks: Record<string, string[]>): ServerStatus[] {
@@ -32,10 +31,9 @@ export class TaskService implements vscode.Disposable {
     private inflight = new Map<string, SnapshotQuery>();
     private processes = new Map<string, TaskProcess>();
     private reminderTargets = new Map<string, TaskProcess>();
-    private logs = new Map<string, Set<string>>();
     private directories = new Map<string, Set<string>>();
+    private taskFiles = new Map<string,Set<string>>();
     private watches: GpuReminder[];
-    private grants: Record<string, string[]>;
     private timer?: NodeJS.Timeout;
     private disposed = false;
     private checking = false;
@@ -66,7 +64,6 @@ export class TaskService implements vscode.Disposable {
             try { return [{...createReminder({...w},w.createdAt),id:w.id,status:w.status}]; } catch { return []; }
         });
         this.watches.forEach(w => { w.stableSince = undefined; });
-        this.grants = context.globalState.get<Record<string,string[]>>(GRANTS, {});
         this.schedule();
     }
     onChange(callback: () => void): vscode.Disposable { this.events.on('change', callback); return { dispose: () => this.events.off('change', callback) }; }
@@ -139,15 +136,19 @@ export class TaskService implements vscode.Disposable {
     private rememberDirectory(id:string,path:unknown){
         try {const p=validateTaskPath(path);if(p==='/')return;const paths=this.directories.get(id)||new Set<string>();paths.add(p);this.directories.set(id,paths);} catch { /* Sensitive paths do not become browsing capabilities. */ }
     }
-    async query(id: string, kind: TaskQuery, args: Record<string,unknown>, signal?: AbortSignal, allowOnce=false): Promise<any> {
+    private rememberFile(id:string,path:unknown){
+        try {const p=validateTaskPath(path),files=this.taskFiles.get(id)||new Set<string>();files.add(p);this.taskFiles.set(id,files);}catch { /* Sensitive files cannot become automatic-read capabilities. */ }
+    }
+    async query(id: string, kind: TaskQuery, args: Record<string,unknown>, signal?: AbortSignal, permission:'ask'|'once'|'full'='ask'): Promise<any> {
         this.assertActive(signal);
+        if(!['ask','once','full'].includes(permission))throw new Error('Invalid file permission mode.');
         const host=this.resolve(id);
         if(kind==='files'&&!this.directories.get(id)?.has(validateTaskPath(args.path)))throw new Error('Directory has not been discovered from this task. Inspect its process or Slurm job first, then browse observed child directories.');
         if (kind==='log') {
             const limits=this.logLimits();args={...args,lines:Math.min(Number(args.lines)||limits.lines,limits.lines),maxBytes:Math.min(Number(args.maxBytes)||limits.maxBytes,limits.maxBytes)};
             const path=validateTaskPath(args.path);
-            if (!allowOnce && !this.grants[id]?.includes(path)) {
-                this.logs.set(id,new Set([...(this.logs.get(id)||[]),path])); this.events.emit('change');
+            if(permission==='full'&&!this.taskFiles.get(id)?.has(path))throw new Error('This file has not been observed in the task. Discover it through task/process/job or directory metadata before using Full Access.');
+            if (permission==='ask') {
                 return { needsAuthorization:true,path,message:'This exact task log needs user authorization. Do not claim to have read it.' };
             }
         }
@@ -171,35 +172,26 @@ export class TaskService implements vscode.Disposable {
             const target=taskReminderTarget(evidence);
             if(target){this.reminderTargets.set(key,target);this.reminderTargets.set(id+':'+target.pid,target);}
             for(const p of evidence.chain.filter(p=>root&&p.user===root.user&&p.pid!=='1')) {
-                const paths=this.logs.get(id)||new Set<string>(); p.logs.forEach(log => { try { paths.add(validateTaskPath(log)); } catch { /* Sensitive paths are not log candidates. */ } }); this.logs.set(id,paths);
                 this.rememberDirectory(id,p.cwd);
-                for(const log of p.logs)this.rememberDirectory(id,posix.dirname(log));
-                for(const entry of p.paths||[])this.rememberDirectory(id,entry.kind==='directory'?entry.path:posix.dirname(entry.path));
+                for(const log of p.logs){this.rememberDirectory(id,posix.dirname(log));this.rememberFile(id,log);}
+                for(const entry of p.paths||[]){this.rememberDirectory(id,entry.kind==='directory'?entry.path:posix.dirname(entry.path));if(entry.kind==='file')this.rememberFile(id,entry.path);}
             }
             result.browsableDirectories=[...this.directories.get(id)||[]];
         }
         if(kind==='job' && typeof result.detail==='string') {
             for(const match of result.detail.matchAll(/\b(WorkDir|StdOut|StdErr)=(.*?)(?=\s+[A-Za-z][A-Za-z0-9_]*=|$)/g)) {
                 try { const p=validateTaskPath(match[2].trim());if(match[1]==='WorkDir')this.rememberDirectory(id,p);
-                    else {const paths=this.logs.get(id)||new Set<string>(); paths.add(p); this.logs.set(id,paths);this.rememberDirectory(id,posix.dirname(p));}
+                    else {this.rememberDirectory(id,posix.dirname(p));this.rememberFile(id,p);}
                 } catch { /* Only safe task paths can be offered. */ }
             }
             result.browsableDirectories=[...this.directories.get(id)||[]];
         }
-        if(kind==='files')for(const entry of result.entries||[])if(entry.kind==='directory')this.rememberDirectory(id,entry.path);
+        if(kind==='files')for(const entry of result.entries||[]){if(entry.kind==='directory')this.rememberDirectory(id,entry.path);if(entry.kind==='file')this.rememberFile(id,entry.path);}
         this.events.emit('change');
         return kind==='log' ? {...result,collectedAt:new Date().toISOString()} : result;
     }
     state() {
-        const paths=new Map([...this.logs].map(([id,values])=>[id,new Set(values)]));
-        for(const [id,grants] of Object.entries(this.grants)){const set=paths.get(id)||new Set<string>();grants.forEach(path=>set.add(path));paths.set(id,set);}
-        return { servers:this.hosts().map(({id,label})=>({id,label})),reminders:this.watches,
-        logs:[...paths].flatMap(([server,paths])=>[...paths].map(path=>({server,path,authorized:Boolean(this.grants[server]?.includes(path))}))) }; }
-    async authorize(id: string, path: string, allow: boolean): Promise<void> {
-        if(allow)this.resolve(id); validateTaskPath(path);
-        const previous=this.grants[id]||[];
-        const next={...this.grants,[id]:allow?[...new Set([...previous,path])]:previous.filter(p=>p!==path)};
-        await this.context.globalState.update(GRANTS,next); this.grants=next; this.events.emit('change');
+        return { servers:this.hosts().map(({id,label})=>({id,label})),reminders:this.watches };
     }
     private async persist(): Promise<void> {
         const value=JSON.parse(JSON.stringify(this.watches));

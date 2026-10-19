@@ -1,10 +1,11 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 import { AiProtocol, aiEndpoint, aiSecretKey, aiTurn, ChatMessage, ToolCall, buildFleetContext, AiTool } from './aiClient';
 import { ServerStatus } from './fleetModel';
 import { TaskService, serverId, visibleFleet } from './taskService';
 import { renderMarkdown } from './markdown';
 import { redactTaskText } from './taskQueries';
+import { ChatSession, PermissionMode, newChatSession, restoreChatSessions, clearSavedChatSessions } from './chatSessions';
 
 const string={type:'string'};
 const tool=(name:string,description:string,properties:Record<string,unknown>,required:string[]=[]):AiTool=>({name,description,parameters:{type:'object',properties,required,additionalProperties:false}});
@@ -21,18 +22,74 @@ const TOOLS:AiTool[]=[
 ];
 export class AiController implements vscode.Disposable {
     private history:ChatMessage[]=[];
-    private approval?:{id:string;server:string;path:string;resolve:(decision:'once'|'remember'|'deny')=>void};
+    private approval?:{id:string;server:string;path:string;resolve:(decision:'once'|'deny'|'full')=>void};
     private active?:AbortController;
     private continuation?:{conversation:ChatMessage[];pending:ToolCall[];context:string};
     private disposed=false;
     private tasks:TaskService;
     private listener:vscode.Disposable;
     private scope?:{server:string;uuid?:string;pid?:string};
+    private sessions:ChatSession[]=[];
+    private session:ChatSession;
+    private running?:Promise<void>;
+    private navigation=Promise.resolve();
+    private storageWrite=Promise.resolve();
+    private fullReads=new Set<AbortController>();
     constructor(private readonly context:vscode.ExtensionContext,private readonly webview:vscode.Webview,
-        private readonly getData:()=>ServerStatus[],private readonly onKeyChange:()=>Promise<void>) {
+        private readonly getData:()=>ServerStatus[],private readonly onKeyChange:()=>Promise<void>,private readonly panelScope='fleet') {
         this.tasks=TaskService.get(context);
+        if(vscode.workspace.getConfiguration('gpu-fleet-viewer').get('ai.saveChatHistory',false))this.sessions=restoreChatSessions(context.globalState.get(this.storageKey(),[]));
+        this.session=this.sessions.filter(s=>s.provider===this.provider()).sort((a,b)=>b.updatedAt-a.updatedAt)[0]||this.createSession();
+        this.loadSession(this.session);
         this.listener=this.tasks.onChange(()=>void this.publishState());
     }
+    private provider(){const {protocol,baseUrl,model}=this.configuration();return createHash('sha256').update(JSON.stringify([protocol,baseUrl,model])).digest('hex');}
+    private storageKey(){return 'gpu-fleet-viewer.chatSessions.'+createHash('sha256').update(this.panelScope).digest('hex').slice(0,16);}
+    private createSession(){const session=newChatSession(this.provider());this.sessions.push(session);return session;}
+    private loadSession(session:ChatSession){this.session=session;this.history=session.history;this.scope=session.scope;this.continuation=session.continuation;}
+    private stashSession(){this.session.history=this.history;this.session.scope=this.scope;this.session.continuation=this.continuation;}
+    private saveSessions(){
+        this.stashSession();
+        const enabled=vscode.workspace.getConfiguration('gpu-fleet-viewer').get('ai.saveChatHistory',false);
+        const data=enabled?this.sessions.map(({id,provider,title,updatedAt,messages})=>({id,provider,title:redactTaskText(title),updatedAt,messages:messages.map(m=>({...m,content:redactTaskText(m.content)}))})):[];
+        this.storageWrite=this.storageWrite.then(async()=>{
+            if(enabled&&vscode.workspace.getConfiguration('gpu-fleet-viewer').get('ai.saveChatHistory',false))await this.context.globalState.update(this.storageKey(),data);
+            else await clearSavedChatSessions(this.context.globalState);
+        }).catch(()=>{if(!this.disposed)void this.webview.postMessage({type:'aiNotice',error:'Could not save local chat history. / 无法保存本机聊天记录。'});});
+        return this.storageWrite;
+    }
+    private async showSession(){
+        if(this.disposed)return;
+        await this.webview.postMessage({type:'aiSession',id:this.session.id,title:this.session.title,draft:this.session.draft,permissionMode:this.session.permissionMode,
+            messages:this.session.messages.map(m=>({...m,...(m.role==='assistant'?{html:renderMarkdown(m.content)}:{})})),canContinue:Boolean(this.continuation)});
+        await this.publishState();
+    }
+    private async changeSession(payload:Record<string,unknown>){
+        const change=async()=>{
+            const target=this.sessions.find(s=>s.id===payload.id&&s.provider===this.provider());
+            if(['switchAiSession','deleteAiSession','renameAiSession'].includes(String(payload.command))&&!target){await this.webview.postMessage({type:'aiNavigationError',error:'Conversation is no longer available. / 会话已不存在。'});return;}
+            if(payload.command==='renameAiSession'){
+                if(typeof payload.title!=='string'||!payload.title.trim()||payload.title.length>80)return;
+                if(target)target.title=payload.title.trim();await this.saveSessions();await this.publishState();return;
+            }
+            if(payload.command==='deleteAiSession'&&target!==this.session){this.sessions=this.sessions.filter(s=>s!==target);await this.saveSessions();await this.publishState();return;}
+            if(!this.disposed)await this.webview.postMessage({type:'aiNavigationStart'});
+            this.active?.abort();await this.running;this.stashSession();
+            if(typeof payload.draft==='string'&&payload.draft.length<=32000)this.session.draft=payload.draft;
+            if(payload.command==='newAiSession')this.loadSession(this.createSession());
+            else if(payload.command==='switchAiSession'&&target)this.loadSession(target);
+            else if(payload.command==='deleteAiSession'){
+                this.sessions=this.sessions.filter(s=>s!==target);
+                this.loadSession(this.sessions.filter(s=>s.provider===this.provider()).sort((a,b)=>b.updatedAt-a.updatedAt)[0]||this.createSession());
+            }else if(payload.command==='clearAi'){
+                const old=this.session;this.sessions=this.sessions.filter(s=>s!==old);this.loadSession(this.createSession());
+            }else if(this.session.provider!==this.provider())this.loadSession(this.sessions.filter(s=>s.provider===this.provider()).sort((a,b)=>b.updatedAt-a.updatedAt)[0]||this.createSession());
+            await this.saveSessions();await this.showSession();
+        };
+        this.navigation=this.navigation.then(change).catch(()=>{if(!this.disposed)void this.webview.postMessage({type:'aiNavigationError',error:'Unable to change conversation. / 无法切换会话。'});});await this.navigation;
+    }
+    historySettingsChanged():void {void this.saveSessions();void this.publishState();}
+    private async runAsk(payload:Record<string,unknown>){await this.navigation;if(this.active||this.disposed)return;const run=this.ask(payload);this.running=run;try{await run;}finally{if(this.running===run)this.running=undefined;}}
     private configuration() {
         const config=vscode.workspace.getConfiguration('gpu-fleet-viewer');
         return {protocol:config.get<AiProtocol>('ai.protocol','openai'),baseUrl:config.get<string>('ai.baseUrl','https://api.openai.com/v1'),model:config.get<string>('ai.model',''),timeoutSeconds:config.get<number>('ai.timeoutSeconds',120)};
@@ -40,19 +97,31 @@ export class AiController implements vscode.Disposable {
     async isConfigured():Promise<boolean> {
         try {const o=this.configuration();return Boolean(await this.context.secrets.get(aiSecretKey(o.protocol,o.baseUrl)));} catch {return false;}
     }
-    reset():void {this.active?.abort();this.active=undefined;this.history=[];this.continuation=undefined;if(!this.disposed) void this.webview.postMessage({type:'aiReset'});}
-    dispose():void {this.disposed=true;this.reset();this.listener.dispose();}
+    reset():void {void this.changeSession({command:'restoreAiSession'});}
+    dispose():void {this.disposed=true;this.active?.abort();this.stashSession();void this.saveSessions();this.listener.dispose();}
     private async publishState() {
         if(this.disposed) return;
         let endpoint='';try {endpoint=aiEndpoint(this.configuration().protocol,this.configuration().baseUrl).host;} catch { /* Settings may be incomplete. */ }
-        await this.webview.postMessage({type:'aiState',...this.tasks.state(),scope:this.scope,endpoint,local:true});
+        if(this.scope&&!this.tasks.hosts().some(h=>h.id===this.scope?.server))this.scope=undefined;
+        this.stashSession();
+        await this.webview.postMessage({type:'aiState',...this.tasks.state(),scope:this.scope,endpoint,local:true,activeId:this.session.id,permissionMode:this.session.permissionMode,
+            savedHistory:vscode.workspace.getConfiguration('gpu-fleet-viewer').get('ai.saveChatHistory',false),
+            sessions:this.sessions.filter(s=>s.provider===this.provider()).sort((a,b)=>b.updatedAt-a.updatedAt).map(({id,title,updatedAt,permissionMode})=>({id,title,updatedAt,permissionMode}))});
     }
     async handle(payload:Record<string,unknown>):Promise<boolean> {
         switch(payload.command) {
             case 'resolveAiApproval': {
                 const pending=this.approval;
-                if(pending&&pending.id===payload.id&&['once','remember','deny'].includes(String(payload.decision)))pending.resolve(payload.decision as 'once'|'remember'|'deny');
+                if(pending&&pending.id===payload.id&&['once','deny'].includes(String(payload.decision)))pending.resolve(payload.decision as 'once'|'deny');
                 return true;
+            }
+            case 'newAiSession':case 'switchAiSession':case 'deleteAiSession':case 'renameAiSession':await this.changeSession(payload);return true;
+            case 'setAiPermissionMode':{
+                if(!['confirm','full'].includes(String(payload.mode))||payload.sessionId!==this.session.id)return true;
+                this.session.permissionMode=payload.mode as PermissionMode;
+                if(payload.mode==='full')this.approval?.resolve('full');
+                else this.fullReads.forEach(read=>read.abort());
+                await this.publishState();return true;
             }
             case 'setAiKey':
             case 'deleteAiKey': {
@@ -80,24 +149,14 @@ export class AiController implements vscode.Disposable {
                 return true;
             }
             case 'aiState':
+                await this.navigation;
                 if(payload.scopeServer===null) this.scope=undefined;
                 else if(typeof payload.scopeServer==='string' && this.tasks.hosts().some(h=>h.id===payload.scopeServer)) this.scope={server:payload.scopeServer};
                 if(payload.host!==undefined) {
                     const match=this.tasks.hosts().find(h=>h.host===payload.host);
                     if(match) this.scope={server:match.id,uuid:typeof payload.uuid==='string'?payload.uuid:undefined,pid:typeof payload.pid==='string'?payload.pid:undefined};
                 }
-                await this.publishState();return true;
-            case 'authorizeTaskLog': {
-                try {
-                    if(typeof payload.server!=='string') throw new Error('Choose a server.');
-                    let path=payload.path;
-                    if(typeof path!=='string') path=await vscode.window.showInputBox({title:'Task log path / 任务日志路径',prompt:'Absolute remote path. Its tail will be sent to your configured AI service when requested. / 读取后会发送到你配置的 API。',ignoreFocusOut:true});
-                    if(typeof path!=='string') return true;
-                    if(payload.revoke!==true&&this.approval?.server===payload.server&&this.approval.path===path){this.approval.resolve('remember');return true;}
-                    await this.tasks.authorize(payload.server,path,payload.revoke!==true);
-                } catch(error) { await this.webview.postMessage({type:'aiNotice',error:redactTaskText((error as Error).message)}); }
-                return true;
-            }
+                if(payload.load===true&&!this.active)await this.showSession();else await this.publishState();return true;
             case 'editReminder': {
                 const hours=await vscode.window.showInputBox({title:'Reminder validity / 提醒有效期',prompt:'Hours from now (1–720) / 从现在起的小时数',value:'24',validateInput:value=>Number.isFinite(Number(value))&&Number(value)>=1&&Number(value)<=720?undefined:'Enter 1–720 hours / 请输入 1–720 小时'});
                 if(hours!==undefined) {try {await this.tasks.manage({action:'update',id:payload.id,expiresAt:Date.now()+Number(hours)*3600000});} catch(error){await this.webview.postMessage({type:'aiNotice',error:(error as Error).message});}} return true;
@@ -125,10 +184,10 @@ export class AiController implements vscode.Disposable {
                 if(typeof payload.url==='string'&&/^https?:\/\//i.test(payload.url)) {try {await vscode.env.openExternal(vscode.Uri.parse(payload.url));} catch { /* Invalid external URLs are ignored. */ }} return true;
             case 'copyAiText':
                 if(typeof payload.text==='string'&&payload.text.length<=128*1024) await vscode.env.clipboard.writeText(payload.text); return true;
-            case 'clearAi': this.reset();return true;
+            case 'clearAi': await this.changeSession(payload);return true;
             case 'cancelAi': this.active?.abort();return true;
-            case 'continueAi': await this.ask({...payload,continuing:true});return true;
-            case 'askAi': await this.ask(payload);return true;
+            case 'continueAi': await this.runAsk({...payload,continuing:true});return true;
+            case 'askAi': await this.runAsk(payload);return true;
             default:return false;
         }
     }
@@ -156,24 +215,29 @@ export class AiController implements vscode.Disposable {
         if(name==='read_task_log') {
             if(args.view!==undefined&&!['head','tail'].includes(String(args.view)))throw new Error('Invalid text view.');
             const readArgs={path:args.path,...(args.view===undefined?{}:{view:args.view}),...this.tasks.logLimits()};
-            let result=await this.tasks.query(args.server,'log',readArgs,signal);
+            let result=this.session.permissionMode==='full'?await this.readTaskText(args.server,readArgs,signal,'full'):await this.tasks.query(args.server,'log',readArgs,signal);
             if(result.needsAuthorization){
                 const decision=await this.requestLogApproval(args.server,result.path,signal,operationId,(args.view||'tail') as 'head'|'tail');
                 if(decision==='deny')return {denied:true,message:'User declined this log. Use other available evidence and do not ask again unless the user requests it.'};
-                if(decision==='remember')await this.tasks.authorize(args.server,result.path,true);
                 if(signal.aborted)throw new Error('Request cancelled.');
-                result=await this.tasks.query(args.server,'log',readArgs,signal,decision==='once');
+                result=await this.readTaskText(args.server,readArgs,signal,decision==='full'?'full':'once');
             }
             if(!result.needsAuthorization)await this.webview.postMessage({type:'taskProgress',host:this.tasks.resolve(args.server),path:args.path,modifiedAt:result.modifiedAt,collectedAt:result.collectedAt});
             return result;
         }
         throw new Error('Unsupported tool.');
     }
-    private async requestLogApproval(server:string,path:string,signal:AbortSignal,operationId?:string,view:'head'|'tail'='tail'):Promise<'once'|'remember'|'deny'> {
+    private async readTaskText(server:string,args:Record<string,unknown>,signal:AbortSignal,permission:'once'|'full'){
+        if(permission==='once')return this.tasks.query(server,'log',args,signal,'once');
+        if(this.session.permissionMode!=='full')throw new Error('Full Access was disabled. Request confirmation for this file.');
+        const read=new AbortController(),cancel=()=>read.abort();this.fullReads.add(read);signal.addEventListener('abort',cancel,{once:true});if(signal.aborted)cancel();
+        try {return await this.tasks.query(server,'log',args,read.signal,'full');}finally{this.fullReads.delete(read);signal.removeEventListener('abort',cancel);}
+    }
+    private async requestLogApproval(server:string,path:string,signal:AbortSignal,operationId?:string,view:'head'|'tail'='tail'):Promise<'once'|'deny'|'full'> {
         const id=randomUUID();
         if(signal.aborted)throw new Error('Request cancelled.');
         return new Promise((resolve,reject)=>{
-            const finish=(decision?:'once'|'remember'|'deny')=>{
+            const finish=(decision?:'once'|'deny'|'full')=>{
                 if(this.approval?.id!==id)return;
                 this.approval=undefined;signal.removeEventListener('abort',cancel);
                 if(!this.disposed)void this.webview.postMessage({type:'aiApprovalResult',id,decision:decision||'cancelled'});
@@ -213,12 +277,24 @@ export class AiController implements vscode.Disposable {
     private async ask(payload:Record<string,unknown>) {
         if(this.active||this.disposed)return;
         const active=new AbortController();this.active=active;
-        const post=async(message:Record<string,unknown>)=>{if(!this.disposed&&this.active===active)await this.webview.postMessage(message);};
+        const post=async(message:Record<string,unknown>)=>{
+            if(this.disposed||this.active!==active)return;
+            if(message.type==='aiResult'){
+                const content=typeof message.error==='string'?message.error:typeof message.answer==='string'?message.answer:'';
+                if(content){this.session.messages.push({role:message.error?'error':'assistant',content});this.session.messages=this.session.messages.slice(-32);this.session.updatedAt=Date.now();}
+                await this.saveSessions();
+            }
+            await this.webview.postMessage(message);
+        };
         let conversation:ChatMessage[]=[],pending:ToolCall[]=[],context='',count=0,combined='';
         try{
             const continuing=payload.continuing===true;
             if(continuing&&!this.continuation)throw new Error('No pending investigation to continue.');
             if(!continuing&&(typeof payload.question!=='string'||!payload.question.trim()||payload.question.length>32000))throw new Error('Enter a question of at most 32000 characters.');
+            this.session.messages.push({role:'user',content:continuing?'Continue investigation / 继续查询':(payload.question as string).trim()});
+            this.session.messages=this.session.messages.slice(-32);this.session.draft='';this.session.updatedAt=Date.now();
+            if(!this.session.title&&!continuing)this.session.title=(payload.question as string).replace(/\s+/g,' ').trim().slice(0,60);
+            await this.publishState();
             const preparedAt=Date.now();await post({type:'aiActivity',id:'prepare',phase:'preparing',state:'running',startedAt:preparedAt});
             const options=this.configuration();const apiKey=await this.context.secrets.get(aiSecretKey(options.protocol,options.baseUrl))||'';
             const c=vscode.workspace.getConfiguration('gpu-fleet-viewer');
@@ -243,7 +319,7 @@ export class AiController implements vscode.Disposable {
                     let part='',last=0;const modelId='model-'+round++,startedAt=Date.now();
                     let result;
                     try{
-                        result=await aiTurn({...options,apiKey,stream},conversation,context+(tools.length?'':'\nTool execution is unavailable in compatibility mode. Use cached facts/general GPU guidance and state this clearly.'),tools,active.signal,delta=>{
+                        result=await aiTurn({...options,apiKey,stream},conversation,context+'\nCurrent file permission mode: '+this.session.permissionMode+(tools.length?'':'\nTool execution is unavailable in compatibility mode. Use cached facts/general GPU guidance and state this clearly.'),tools,active.signal,delta=>{
                             part+=delta;if(Date.now()-last>70){last=Date.now();void post({type:'aiDelta',answer:combined+part,html:renderMarkdown(combined+part)});}
                         },event=>{void post({type:'aiActivity',id:modelId,...event,state:'running',startedAt,endpoint:aiEndpoint(options.protocol,options.baseUrl).host,model:options.model});});
                         await post({type:'aiActivity',id:modelId,state:'done',startedAt,text:result.text});
