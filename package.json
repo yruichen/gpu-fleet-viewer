@@ -12,7 +12,7 @@
 	},
 	"author": "yruichen",
 	"license": "Apache-2.0",
-	"version": "1.3.0",
+	"version": "1.4.3",
 	"icon": "resources/icon.png",
 	"publisher": "yruichen",
 	"pricing": "Free",
@@ -40,8 +40,7 @@
 		"Visualization"
 	],
 	"extensionKind": [
-		"ui",
-		"workspace"
+		"ui"
 	],
 	"activationEvents": [],
 	"main": "./out/extension.js",
@@ -361,12 +360,54 @@
 					"description": "Model ID supplied by your AI provider.",
 					"scope": "application"
 				},
+				"gpu-fleet-viewer.ai.saveChatHistory": {
+					"type": "boolean",
+					"default": false,
+					"description": "Save conversation text in local VS Code storage. Tool evidence and Full Access permissions are not persisted.",
+					"scope": "application"
+				},
 				"gpu-fleet-viewer.ai.timeoutSeconds": {
 					"type": "number",
-					"default": 60,
+					"default": 120,
 					"minimum": 5,
-					"maximum": 300,
-					"description": "Timeout for an AI response in seconds.",
+					"maximum": 900,
+					"description": "Timeout for each model response in seconds; not a total investigation time limit.",
+					"scope": "application"
+				},
+				"gpu-fleet-viewer.visibleGpus": {
+					"type": "object",
+					"default": {},
+					"additionalProperties": {
+						"type": "array",
+						"items": {
+							"type": "string",
+							"pattern": "^(?:[0-9]{1,4}|GPU-[A-Za-z0-9_-]+)$"
+						}
+					},
+					"description": "Visible GPU indices or UUIDs per SSH host. Omitted host = all GPUs; empty list = none. Affects dashboard and default AI scope, not existing reminders."
+				},
+				"gpu-fleet-viewer.ai.maxToolCalls": {
+					"type": "integer",
+					"default": 0,
+					"minimum": 0,
+					"maximum": 10000,
+					"description": "Tool calls per turn; 0 means no fixed count limit. A configured cap pauses with continuation.",
+					"scope": "application"
+				},
+				"gpu-fleet-viewer.ai.logTailLines": {
+					"type": "integer",
+					"default": 500,
+					"minimum": 20,
+					"maximum": 10000,
+					"description": "Maximum task log tail lines per read.",
+					"scope": "application"
+				},
+				"gpu-fleet-viewer.ai.logTailKiB": {
+					"type": "integer",
+					"default": 256,
+					"minimum": 16,
+					"maximum": 2048,
+					"description": "Maximum task log tail read size in KiB. Exact-file authorization still applies.",
 					"scope": "application"
 				}
 			}
@@ -380,10 +421,11 @@
 		"watch": "tsc -watch -p ./",
 		"pretest": "npm run compile && npm run lint",
 		"lint": "eslint src --ext ts",
-		"test": "node scripts/checkLocales.js && node ./out/test/manual_test.js && node scripts/checkAi.js && node scripts/checkRelease.js && node scripts/checkRefresh.js && npm run preview:build && node scripts/checkWebview.js"
+		"test": "node scripts/checkLocales.js && node ./out/test/manual_test.js && node scripts/checkAi.js && node scripts/checkTaskQueries.js && node scripts/checkReminders.js && node scripts/checkAssistant.js && node scripts/checkRelease.js && node scripts/checkRefresh.js && npm run preview:build && node scripts/checkWebview.js"
 	},
 	"devDependencies": {
 		"@types/glob": "^8.1.0",
+		"@types/markdown-it": "^14.2.0",
 		"@types/mocha": "^10.0.1",
 		"@types/node": "20.2.5",
 		"@types/vscode": "^1.80.0",
@@ -399,6 +441,7 @@
 		"typescript": "^5.1.3"
 	},
 	"dependencies": {
+		"markdown-it": "^15.0.3",
 		"xml2js": "^0.6.2"
 	}
 }

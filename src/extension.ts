@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import { GpuServerProvider } from './serverProvider';
 import { GpuStatusSummary, GpuViewPanel } from './gpuView';
 import { SshConfigParser } from './sshConfig';
+import { TaskService } from './taskService';
+import { clearSavedChatSessions } from './chatSessions';
 
 const configurationKeys = [
     'language',
@@ -50,6 +52,13 @@ async function migrateLegacySettings(): Promise<void> {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     await migrateLegacySettings();
+    const clearDisabledHistory=async()=>{
+        if(!vscode.workspace.getConfiguration('gpu-fleet-viewer').get('ai.saveChatHistory',false)){
+            try{await clearSavedChatSessions(context.globalState);}catch{void vscode.window.showErrorMessage('Could not clear saved chat history. / 无法清除已保存的聊天记录。');}
+        }
+    };
+    await clearDisabledHistory();
+    TaskService.get(context);
     const serverProvider = new GpuServerProvider();
     const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     statusBar.command = 'gpu-fleet-viewer.openDashboard';
@@ -181,6 +190,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             }
         }),
         vscode.workspace.onDidChangeConfiguration(event => {
+            if(event.affectsConfiguration('gpu-fleet-viewer.ai.saveChatHistory'))void clearDisabledHistory();
             if (event.affectsConfiguration('gpu-fleet-viewer.showStatusBar')) {
                 updateStatusBarVisibility();
             }

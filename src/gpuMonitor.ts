@@ -1,7 +1,6 @@
 import * as cp from 'child_process';
 import * as xml2js from 'xml2js';
-import * as path from 'path';
-import * as os from 'os';
+import { sshConfigArguments } from './sshConfig';
 
 export interface SlurmJobInfo {
     id: string;
@@ -15,6 +14,7 @@ export interface GpuProcessInfo {
     name: string;
     command: string;
     elapsedSeconds: number;
+    startIdentity?: string;
     usedMemory: string;
     slurm?: SlurmJobInfo;
 }
@@ -52,6 +52,7 @@ export interface ServerSnapshot {
 }
 
 export interface MonitorOptions {
+    signal?: AbortSignal;
     sshConfigPath?: string;
     timeoutSeconds: number;
     includeProcessOwners: boolean;
@@ -64,6 +65,7 @@ interface ProcessDetails {
     user: string;
     elapsedSeconds: number;
     command: string;
+    startIdentity?: string;
 }
 
 const PROCESS_MARKER = '__GPU_FLEET_PROCESSES__';
@@ -87,7 +89,7 @@ export class GpuMonitor {
         const timeoutSeconds = Math.max(2, Math.min(options.timeoutSeconds, 60));
         const startedAt = Date.now();
         const remoteCommand = this.buildRemoteCommand(options);
-        const stdout = await this.execSsh(host, remoteCommand, timeoutSeconds, options.sshConfigPath);
+        const stdout = await this.execSsh(host, remoteCommand, timeoutSeconds, options.sshConfigPath, options.signal);
         const sections = this.splitSections(stdout);
         const processDetails = this.parseProcessDetails(sections.details || '');
         const slurm = this.parseSlurm(
@@ -149,6 +151,7 @@ export class GpuMonitor {
                 name: processName || 'unknown',
                 command: processDetails?.command || processName || 'unknown',
                 elapsedSeconds: processDetails?.elapsedSeconds || 0,
+                startIdentity: processDetails?.startIdentity,
                 usedMemory: this.withUnit(usedMemory, 'MiB')
             });
             processesByUuid.set(uuid, processes);
@@ -274,7 +277,7 @@ export class GpuMonitor {
                 commands.push(
                     `printf '${DETAILS_MARKER}\n'`,
                     `pids=$(printf '%s\n' "$processes" | cut -d, -f2 | tr -d ' ' | paste -sd, -)`,
-                    `if [ -n "$pids" ]; then ps -o pid= -o user= -o etimes= -o args= -p "$pids" 2>/dev/null || true; fi`
+                    `if [ -n "$pids" ]; then LC_ALL=C ps -o pid= -o user= -o etimes= -o lstart= -o args= -p "$pids" 2>/dev/null || true; fi`
                 );
             }
         }
@@ -305,10 +308,21 @@ export class GpuMonitor {
         ].join('; ');
     }
 
-    private execSsh(host: string, remoteCommand: string, timeoutSeconds: number, configPath?: string): Promise<string> {
-        const configArgs = configPath && configPath !== '~/.ssh/config'
-            ? ['-F', configPath.startsWith('~/') ? path.join(os.homedir(), configPath.slice(2)) : configPath]
-            : [];
+    public async queryTask(host: string, kind: import('./taskQueries').TaskQuery, args: Record<string, unknown>, options: MonitorOptions): Promise<any> {
+        this.validateHost(host);
+        const { taskCommand, redactTaskText } = await import('./taskQueries');
+        const raw = await this.execSsh(host, taskCommand(kind, args), Math.max(2, Math.min(options.timeoutSeconds, 60)), options.sshConfigPath, options.signal);
+        try {
+            const redact = (value: any): any => typeof value === 'string' ? redactTaskText(value)
+                : Array.isArray(value) ? value.map(redact)
+                : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key,entry]) => [key,redact(entry)])) : value;
+            return redact(JSON.parse(raw));
+        }
+        catch { throw new Error('Task query returned invalid data. Linux /proc and python3 are required on the SSH host.'); }
+    }
+
+    private execSsh(host: string, remoteCommand: string, timeoutSeconds: number, configPath?: string, signal?: AbortSignal): Promise<string> {
+        const configArgs = sshConfigArguments(configPath);
         return new Promise((resolve, reject) => {
             cp.execFile('ssh', [
                 ...configArgs,
@@ -318,6 +332,7 @@ export class GpuMonitor {
                 remoteCommand
             ], {
                 timeout: timeoutSeconds * 1000,
+                signal,
                 maxBuffer: 16 * 1024 * 1024
             }, (error, stdout, stderr) => {
                 if (error) {
@@ -357,10 +372,12 @@ export class GpuMonitor {
         for (const line of output.split(/\r?\n/)) {
             const match = line.trim().match(/^(\d+)\s+(\S+)\s+(\d+)\s+(.+)$/);
             if (match) {
+                const started = match[4].match(/^((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\w{3}\s+\d{1,2}\s+\d\d:\d\d:\d\d\s+\d{4})\s+(.+)$/);
                 details.set(match[1], {
                     user: match[2],
                     elapsedSeconds: Number.parseInt(match[3], 10) || 0,
-                    command: match[4]
+                    command: started ? started[2] : match[4],
+                    startIdentity: started?.[1]
                 });
             }
         }

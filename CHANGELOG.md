@@ -2,6 +2,43 @@
 
 All notable changes to GPU Fleet Viewer are documented here.
 
+## 1.4.3 - 2026-10-19
+
+- Replace the authorization sidebar with separate conversations: new, switch, rename and delete, with isolated context, drafts, task scope and permission mode.
+- Move permissions beside the input: confirm each file read, or Full Access for automatic reading of discovered task files through existing read-only tools; remove stored per-file grants.
+- Cancel pending automatic reads when returning to confirmation mode, invalidate approvals when switching chats, and preserve interrupted work in its original conversation.
+- Offer optional local conversation-text history, disabled by default; omit tool evidence and permissions, restore with confirmation required, and clear all panel copies when disabled.
+- Preserve prefilled GPU questions on first opening and keep dashboard and server-panel chat storage separate.
+
+## 1.4.2 - 2026-10-19
+
+- Let the model explore observed task directories and open-file/path metadata, then request authorized head/tail text from actual files, without filename templates or question routing rules.
+- Remove fixed-format progress extraction; send raw task evidence for model interpretation. Retain exact-file approval, read-only operations and sensitive-path protection.
+- Retry non-streaming requests with tools before plain-chat fallback; explicitly show when the API/model cannot support investigation tools.
+- Automatically collapse completed operation records after the final answer, with manual re-opening; distinguish user inputs, assistant answers and failures using restrained message styling.
+- Share one SSH concurrency budget across dashboards, assistant queries and reminders; coalesce matching snapshots, reuse very recent data, and back off failed automatic queries while preserving immediate manual retries.
+- Reorganize the dashboard header, actionable availability/warning summaries, search and compact filters; move language into settings and standardize the product name as GPU Fleet.
+- Distinguish task details from the main dashboard and replace the extension, sidebar and dashboard marks with one simplified chip symbol.
+
+## 1.4.1 - 2026-10-19
+
+- Show actual AI connection, waiting, response and tool stages inline with elapsed time and expandable evidence.
+- Replace log authorization dialogs with exact-file inline allow-once, remember and decline actions that automatically resume the pending query.
+- Preserve safe network error codes, request phases and redacted HTTP diagnostics; retain pending work for retry, including cancellation during authorization.
+- Default to unlimited tool calls, with an optional user budget and continuation; expand question, context, response, timeout and configurable log-read capacities.
+- Compact old tool groups without breaking protocol pairs and bound displayed activity details so long investigations can keep running.
+- Move GPU/task details into a right sidebar or narrow-window drawer, retaining selection and scroll through refreshes, with Escape and focus restoration.
+
+## 1.4.0 - 2026-10-19
+
+- Kept the dashboard and rebuilt AI as a compact chat dialog with a task/context sidebar, safe Markdown tables/code, streaming, cancellation, keyboard input and query evidence.
+- Added native OpenAI/Anthropic tool turns for fresh GPU status, parent-process tracing, bounded host diagnosis, Slurm details/accounting and explicitly authorized task-log tails.
+- Required local desktop extension execution so SSH uses the local network, SSH configuration, agent and jump hosts, including in remote workspaces.
+- Added evidence-based progress/phase ETA and explicit unknown states; no arbitrary shell, task termination, remote writes or automatic training changes.
+- Added persistent GPU release, verified task-end and scheduled reminders, independent of dashboard visibility, with deadlines and cancellation.
+- Added per-server GPU visibility settings and consistent dashboard/statistics/AI scope, individual notification events, section resets, dependent controls and unsaved-change protection.
+- Replaced the narrow process table with a selectable task list, readable commands, parent-process evidence and direct assistant/reminder actions.
+
 ## 1.3.0 - 2026-10-19
 
 - Fixed dashboard flicker and jumping by preserving server, GPU, and process DOM nodes, keyboard focus, and inspector scroll during progressive refreshes.

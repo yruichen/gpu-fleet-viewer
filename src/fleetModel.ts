@@ -25,6 +25,7 @@ export interface ServerMetadata {
 }
 
 export interface ServerStatus {
+    hiddenGpuCount?: number;
     host: string;
     gpus: FleetGpuInfo[];
     health?: HostHealth;
@@ -38,6 +39,7 @@ export interface ServerStatus {
     healthAvailable?: boolean;
     error?: string;
     errorCategory?: ServerErrorCategory;
+    nextRetryAt?: number;
 }
 
 export interface GpuStatusSummary {

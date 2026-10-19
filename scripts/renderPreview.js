@@ -111,7 +111,7 @@ const previewMessage = {
     type: 'update',
     preferences: { ...Object.fromEntries(preferenceFields.map(field => [field.key, field.default])), researchUser: 'alice' },
     aiConfigured: false,
-    title: 'Fleet Summary',
+    title: 'GPU Fleet',
     data,
     settings: {
         compactLayout: true,
@@ -192,11 +192,8 @@ html = html.replace(
             document.getElementById('refresh-state').textContent = 'Settings command requested';
         } else if (message.command === 'savePreferences') {
             Object.assign(window.__gpuPreview.preferences, message.values);
+            if (message.values.language) window.__gpuPreview.language = message.values.language === 'zh-CN' ? 'zh-CN' : 'en';
             window.postMessage({ type: 'preferencesResult', success: true, values: message.values }, '*');
-            window.postMessage(window.__gpuPreview, '*');
-        } else if (message.command === 'setLanguage') {
-            window.__gpuPreview.language = message.language;
-            window.__gpuPreview.title = message.language === 'zh-CN' ? '科研 GPU 集群' : 'Fleet Summary';
             window.postMessage(window.__gpuPreview, '*');
         } else if (message.command === 'openGpuTerminal' || message.command === 'copyValue') {
             document.getElementById('refresh-state').textContent = message.command + ' requested';

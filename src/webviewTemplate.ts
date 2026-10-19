@@ -14,6 +14,7 @@ export function getDashboardScript(): string {
     return `
         const vscode = acquireVsCodeApi();
         const content = document.getElementById('content');
+        const detailSidebar = document.getElementById('gpu-details');
         const summaryRoot = document.getElementById('summary');
         const usersRoot = document.getElementById('user-filters');
         const refreshState = document.getElementById('refresh-state');
@@ -21,7 +22,7 @@ export function getDashboardScript(): string {
         const searchInput = document.getElementById('search-input');
         const statusFilter = document.getElementById('status-filter');
         const sortSelect = document.getElementById('sort-select');
-        const languageButton = document.getElementById('language-button');
+        const refreshMode = document.getElementById('refresh-mode');
         const refreshButton = document.getElementById('refresh-button');
         const settingsButton = document.getElementById('settings-button');
         const assistantButton = document.getElementById('assistant-button');
@@ -37,6 +38,10 @@ export function getDashboardScript(): string {
         let language = 'en';
         let refreshStatus = { state: 'idle', completed: 0, total: 0 };
         let visibleGpuCount = 0;
+        const selectedTasks = new Map();
+        const taskEvidence = new Map();
+        const taskProgress = new Map();
+        const taskText = (en, zh) => language === 'zh-CN' ? zh : en;
 
         const translations = ${JSON.stringify(dashboardTranslations)};
         const icons = ${JSON.stringify(lineIcons)};
@@ -83,14 +88,13 @@ export function getDashboardScript(): string {
 
         function applyStaticLanguage() {
             document.documentElement.lang = language;
-            languageButton.textContent = t('languageButton');
-            languageButton.title = t('switchLanguage');
             settingsButton.replaceChildren(icon('settings-2'), document.createTextNode(t('settings')));
             assistantButton.replaceChildren(icon('sparkles'), document.createTextNode(t('assistant')));
             refreshButton.replaceChildren(icon('refresh-cw'), document.createTextNode(t('refresh')));
             document.getElementById('min-memory-label').textContent = t('minFreeMemory');
             document.getElementById('min-gpus-label').textContent = t('matchingGpus');
             myTasksButton.replaceChildren(icon('user'), document.createTextNode(t('myTasks')));
+            myTasksButton.title=currentMessage?.preferences?.researchUser?taskText('Filter by your configured username','按设置中的用户名筛选'):taskText('Set your remote username in Settings','在设置中填写远程用户名');
             myTasksButton.setAttribute('aria-pressed', String(Boolean(currentMessage && currentMessage.preferences && currentMessage.preferences.researchUser && selectedUser === currentMessage.preferences.researchUser)));
             resetFiltersButton.replaceChildren(icon('rotate-ccw'), document.createTextNode(t('resetFilters')));
             searchInput.placeholder = t('search');
@@ -120,17 +124,19 @@ export function getDashboardScript(): string {
                 const progressText = total ? ' ' + completed + '/' + total : '';
                 refreshState.textContent = t('refreshing') + progressText;
             } else if (currentMessage) {
-                refreshState.textContent = t('updated') + ' ' + new Date(currentMessage.summary.updatedAt).toLocaleTimeString() +
-                    ' · ' + visibleGpuCount + ' ' + t('shown');
+                refreshState.textContent = t('updated') + ' ' + new Date(currentMessage.summary.updatedAt).toLocaleTimeString();
             }
+            const automatic=currentMessage?.refresh?.automatic??currentMessage?.preferences?.autoRefresh??true;
+            const interval=currentMessage?.refresh?.intervalSeconds||currentMessage?.preferences?.refreshInterval||5;
+            refreshMode.textContent=automatic?taskText('Auto · ','自动 · ')+interval+taskText('s',' 秒'):taskText('Manual refresh','手动刷新');
+            refreshMode.dataset.automatic=String(automatic);
+            refreshMode.title=taskText('Refresh settings. Interval after each completed round; failed hosts back off. Hidden panels pause by default.','刷新设置：每轮完成后间隔刷新；失败主机延迟重试，面板隐藏时默认暂停。');
         }
 
         refreshButton.addEventListener('click', () => vscode.postMessage({ command: 'refresh' }));
         settingsButton.addEventListener('click', () => window.dispatchEvent(new Event('openPreferences')));
         assistantButton.addEventListener('click', () => window.dispatchEvent(new Event('openAssistant')));
-        languageButton.addEventListener('click', () => vscode.postMessage({
-            command: 'setLanguage', language: language === 'zh-CN' ? 'en' : 'zh-CN'
-        }));
+        refreshMode.addEventListener('click',()=>window.dispatchEvent(new CustomEvent('openPreferences',{detail:'refresh'})));
         searchInput.addEventListener('input', () => renderFleet());
         statusFilter.addEventListener('change', () => renderFleet());
         sortSelect.addEventListener('change', () => renderFleet());
@@ -284,33 +290,31 @@ export function getDashboardScript(): string {
         function renderSummary(summary, settings) {
             const serverPercent = percent(summary.serversOnline, summary.serversTotal);
             const availablePercent = percent(summary.gpusAvailable, summary.gpusTotal);
-            const warningPercent = percent(summary.warnings, summary.gpusTotal);
             const powerPercent = percent(summary.powerDraw, summary.powerLimit);
             const items = [
-                { label: t('servers'), value: summary.serversOnline + ' / ' + summary.serversTotal,
-                    detail: Math.round(serverPercent) + '% ' + t('online'), level: serverPercent, tone: serverPercent < 100 ? 'caution' : 'good' },
-                { label: t('physicalGpus'), value: String(summary.gpusTotal),
-                    detail: summary.utilizationPercent + '% ' + t('util'), level: summary.utilizationPercent, tone: 'neutral' },
-                { label: t('available'), value: summary.gpusAvailable + ' / ' + summary.gpusTotal,
-                    detail: Math.round(availablePercent) + '%', level: availablePercent, tone: 'good' },
-                { label: t('warnings'), value: String(summary.warnings),
-                    detail: Math.round(warningPercent) + '%', level: warningPercent, tone: summary.warnings ? 'warning' : 'neutral' },
+                { label: t('available')+' GPU', value: summary.gpusAvailable + ' / ' + summary.gpusTotal,
+                    detail: Math.round(availablePercent)+'% · '+t('matchesRules'),tone:'good',filter:'available' },
+                { label: t('util'), value:summary.utilizationPercent+'%',detail:taskText('GPU average','GPU 平均利用率'),level:summary.utilizationPercent,tone:'neutral' },
                 { label: t('memory'), value: summary.memoryPercent + '%',
                     detail: formatMemory(summary.memoryUsed) + ' / ' + formatMemory(summary.memoryTotal),
                     level: summary.memoryPercent, tone: summary.memoryPercent >= settings.memoryWarningThreshold ? 'warning' : 'neutral' },
                 { label: t('power'), value: formatPower(summary.powerDraw),
                     detail: Math.round(powerPercent) + '% ' + t('ofLimit'), level: powerPercent,
-                    tone: powerPercent >= settings.powerWarningThreshold ? 'warning' : 'neutral' }
+                    tone: powerPercent >= settings.powerWarningThreshold ? 'warning' : 'neutral' },
+                { label:t('servers'),value:summary.serversOnline+' / '+summary.serversTotal,detail:t('online'),tone:serverPercent<100?'caution':'neutral',filter:serverPercent<100?'offline':undefined },
+                { label:t('warnings'),value:String(summary.warnings),detail:taskText('GPUs above thresholds','超过告警阈值的 GPU'),tone:summary.warnings?'warning':'neutral',filter:summary.warnings?'warning':undefined }
             ];
             const fragment = document.createDocumentFragment();
             for (const summary of items) {
-                const item = node('div', 'summary-item summary-' + summary.tone);
+                const className='summary-item summary-'+summary.tone+(summary.filter?' summary-filter':'');
+                const item=summary.filter?button('',className,()=>{statusFilter.value=statusFilter.value===summary.filter?'all':summary.filter;renderFleet();}):node('div',className);
+                if(summary.filter){item.dataset.filter=summary.filter;item.setAttribute('aria-pressed',String(statusFilter.value===summary.filter));item.title=taskText('Toggle filter: ','切换筛选：')+summary.label;}
                 item.append(
                     node('span', 'summary-label', summary.label),
                     node('strong', 'summary-value', summary.value),
-                    node('span', 'summary-detail', summary.detail),
-                    visualMeter(summary.level, 'visual-meter summary-meter', summary.label)
+                    node('span', 'summary-detail', summary.detail)
                 );
+                if(summary.level!==undefined)item.append(visualMeter(summary.level, 'visual-meter summary-meter', summary.label));
                 fragment.append(item);
             }
             patchChildren(summaryRoot, fragment);
@@ -330,6 +334,7 @@ export function getDashboardScript(): string {
                 renderFleet();
             });
             all.dataset.key = 'all-users';
+            all.setAttribute('aria-pressed',String(!selectedUser));
             fragment.append(all);
             for (const user of users) {
                 const label = user.user + ' · ' + user.gpuCount + ' GPU · ' + formatMemory(user.memoryMiB);
@@ -395,11 +400,12 @@ export function getDashboardScript(): string {
 
             const main = button('', 'gpu-main', () => {
                 if (settings.showProcesses) {
-                    selectedGpuKey = selected ? undefined : key;
-                    renderFleet();
+                    if(selected)closeInspector();
+                    else {selectedGpuKey=key;renderFleet();detailSidebar.querySelector('button')?.focus({preventScroll:true});}
                 }
             }, settings.showProcesses ? t('inspectGpu') : gpu.name);
             main.setAttribute('aria-expanded', String(Boolean(selected && settings.showProcesses)));
+            main.setAttribute('aria-controls','gpu-details');
             const heading = node('div', 'gpu-heading');
             const identity = node('div', 'gpu-identity');
             identity.append(node('span', 'gpu-index', 'GPU ' + gpu.index), node('strong', 'gpu-name', gpu.name));
@@ -446,49 +452,67 @@ export function getDashboardScript(): string {
             return card;
         }
 
+        function closeInspector(){
+            const trigger=Array.from(content.querySelectorAll('.gpu-tile')).find(card=>card.dataset.key===selectedGpuKey)?.querySelector('.gpu-main');
+            selectedGpuKey=undefined;renderFleet();(trigger||searchInput).focus({preventScroll:true});
+        }
+        document.addEventListener('keydown',event=>{
+            if(event.key==='Escape'&&!detailSidebar.hidden&&!document.querySelector('dialog[open]')){event.preventDefault();closeInspector();}
+        });
         function renderInspector(server, gpu) {
-            const inspector = node('section', 'process-inspector');
-            inspector.dataset.key = 'inspector:' + gpu.uuid;
-            const header = node('header', 'inspector-header');
-            const title = node('div');
-            title.append(node('strong', '', (server.metadata && server.metadata.alias || server.host) + ' · GPU ' + gpu.index),
-                node('span', 'subtle block', gpu.name + ' · ' + gpu.uuid));
-            header.append(title, button(t('close'), 'secondary-button compact-button', () => {
-                selectedGpuKey = undefined;
-                renderFleet();
-            }));
-            inspector.append(header);
-            if (!gpu.processes.length) {
-                inspector.append(node('div', 'inspector-empty', t('noProcesses')));
-                return inspector;
+            const key=server.host+':'+gpu.uuid;
+            const inspector=node('section','process-inspector');inspector.dataset.key='inspector:'+key;
+            const header=node('header','inspector-header');
+            const title=node('div');title.id='gpu-details-title';title.append(node('strong','',(server.metadata?.alias||server.host)+' · GPU '+gpu.index),node('span','subtle block',gpu.name+' · '+gpu.memory.used+' / '+gpu.memory.total+' · '+gpu.utilization.gpu));
+            const close=button('','secondary-button compact-button',closeInspector,t('close')+' (Esc)');close.setAttribute('aria-label',t('close'));close.append(icon('x'));
+            header.append(title,close);inspector.append(header);
+            const actions=node('div','task-primary-actions');
+            const ask=(process)=>window.dispatchEvent(new CustomEvent('openAssistant',{detail:{host:server.host,uuid:gpu.uuid,pid:process?.pid,question:process?taskText('Identify this GPU task and inspect its launcher and progress.','查一下这个 GPU 任务的训练入口和进度。'):taskText('What is running on this GPU?','这张 GPU 在运行什么任务？')}}));
+            actions.append(button(taskText('Ask AI','问 AI'),'secondary-button compact-button',()=>ask(selectedTasks.get(key))),button(taskText('Notify when free','释放时提醒我'),'secondary-button compact-button',()=>{vscode.postMessage({command:'watchGpu',host:server.host,uuid:gpu.uuid});window.dispatchEvent(new CustomEvent('openAssistant',{detail:{host:server.host,uuid:gpu.uuid}}));}));inspector.append(actions);
+            if(!gpu.processes.length&&!selectedTasks.has(key)){inspector.append(node('p','subtle',t('noProcesses')));return inspector;}
+            const layout=node('div','task-inspector-layout');
+            const list=node('div','process-scroll task-list');list.setAttribute('role','group');list.setAttribute('aria-label',taskText('GPU processes','GPU 进程'));
+            if(!selectedTasks.has(key)&&gpu.processes.length)selectedTasks.set(key,{...gpu.processes[0]});
+            const selected=selectedTasks.get(key);
+            for(const process of gpu.processes){
+                const row=button('','task-row',()=>{selectedTasks.set(key,{...process});renderFleet();});row.dataset.key=process.pid+':'+(process.startIdentity||'');row.setAttribute('aria-pressed',String(selected?.pid===process.pid&&(!selected.startIdentity||selected.startIdentity===process.startIdentity)));
+                const command=process.command||process.name;
+                row.append(node('strong','task-owner',process.user+' · PID '+process.pid),node('span','task-entrypoint',command),node('span','subtle',formatDuration(process.elapsedSeconds)+' · '+process.usedMemory));row.title=command;list.append(row);
             }
-            const scroll = node('div', 'process-scroll');
-            const table = node('table', 'process-table');
-            const head = node('thead');
-            const headRow = node('tr');
-            [t('command'), t('user'), 'PID', t('runtime'), t('gpuMemory'), 'Slurm', t('copy')].forEach(label => headRow.append(node('th', '', label)));
-            head.append(headRow);
-            const body = node('tbody');
-            for (const process of gpu.processes) {
-                const row = node('tr');
-                row.dataset.key = process.pid;
-                const command = node('td', 'command-cell', process.command || process.name);
-                command.title = process.command || process.name;
-                const slurm = process.slurm ? process.slurm.id + ' · ' + process.slurm.name + ' · ' + process.slurm.state : '—';
-                const actions = node('td', 'copy-actions');
-                actions.append(
-                    button('PID', 'table-button', () => vscode.postMessage({ command: 'copyValue', kind: 'pid', host: server.host, uuid: gpu.uuid, pid: process.pid })),
-                    button(t('cmd'), 'table-button', () => vscode.postMessage({ command: 'copyValue', kind: 'command', host: server.host, uuid: gpu.uuid, pid: process.pid }))
-                );
-                row.append(command, node('td', '', process.user), node('td', '', process.pid),
-                    node('td', '', formatDuration(process.elapsedSeconds)), node('td', 'numeric', process.usedMemory),
-                    node('td', 'slurm-cell', slurm), actions);
-                body.append(row);
+            const details=node('section','task-details');details.dataset.key='selected-task';
+            if(selected){
+                const live=gpu.processes.find(p=>p.pid===selected.pid&&(selected.startIdentity?p.startIdentity===selected.startIdentity:p.elapsedSeconds>=selected.elapsedSeconds));
+                if(!live)details.append(node('p','task-ended',taskText('This selected process is no longer in the current sample. Exit status is unknown.','选中进程已不在本次采样中；退出状态未知。')));
+                const process=live||selected;
+                details.append(node('strong','',process.user+' · PID '+process.pid),node('span','subtle block',taskText('Runtime: ','已运行：')+formatDuration(process.elapsedSeconds)+' · '+taskText('GPU memory: ','GPU 显存：')+process.usedMemory));
+                if(process.slurm)details.append(node('p','subtle','Slurm '+process.slurm.id+' · '+process.slurm.name+' · '+process.slurm.state));
+                details.append(node('pre','task-command',process.command||process.name));
+                const controls=node('div','dialog-actions');
+                controls.append(button(taskText('Trace task source','查询任务来源'),'secondary-button compact-button',()=>{taskEvidence.set(key+':'+process.pid,{loading:true});vscode.postMessage({command:'inspectTask',host:server.host,uuid:gpu.uuid,pid:process.pid});renderFleet();}),button(t('cmd'),'secondary-button compact-button',()=>vscode.postMessage({command:'copyAiText',text:process.command||process.name})),button('PID','secondary-button compact-button',()=>vscode.postMessage({command:'copyAiText',text:process.pid})),button(taskText('Ask AI about task','问 AI 分析任务'),'secondary-button compact-button',()=>ask(process)));
+                controls.firstElementChild.disabled=!live;inspector.append(node('span','subtle task-sample-time',taskText('GPU sample: ','GPU 采样：')+new Date(server.lastSuccessAt||server.collectedAt).toLocaleTimeString()));details.append(controls);
+                const evidence=taskEvidence.get(key+':'+process.pid);
+                if(evidence){
+                    if(evidence.loading)details.append(node('p','subtle',taskText('Tracing parent processes…','正在追查父进程…')));
+                    else if(evidence.error)details.append(node('p','task-ended',evidence.error));
+                    else {
+                        details.append(node('p','subtle',taskText('Task evidence: ','任务查询：')+new Date(evidence.collectedAt).toLocaleTimeString()));
+                        const chain=node('div','task-parent-chain');
+                        for(const parent of evidence.chain||[]) {const item=node('div','task-parent');item.append(node('strong','',parent.user+' · PID '+parent.pid+' → '+parent.ppid),node('code','block',parent.command),node('span','subtle block',parent.cwd||''));chain.append(item);}
+                        if(!chain.childNodes.length)chain.append(node('p','subtle',taskText('No accessible process evidence. The task may have exited or permission is missing.','没有可读取的进程信息：任务可能已退出或权限不足。')));
+                        details.append(chain);
+                        const paths=[...new Set((evidence.chain||[]).flatMap(p=>p.logs||[]))];
+                        for(const path of paths) {
+                            const log=node('div','task-parent');log.append(node('strong','',taskText('Task log','任务日志')),node('code','block',path));
+                            const progress=taskProgress.get(server.host+':'+path);
+                            if(progress){
+                                log.append(node('span','subtle block',taskText('Log updated: ','日志更新：')+new Date(progress.modifiedAt*1000).toLocaleString()),node('span','subtle block',taskText('Read at: ','已读取于：')+new Date(progress.collectedAt).toLocaleTimeString()+taskText(' · Interpretation in AI chat',' · 进度解读见 AI 对话')));
+                            } else log.append(node('span','subtle block',taskText('Ask AI to inspect progress; it will request log authorization if needed.','问 AI 查询进度，需要读取日志时会在对话中请求授权。')));
+                            details.append(log);
+                        }
+                    }
+                }
             }
-            table.append(head, body);
-            scroll.append(table);
-            inspector.append(scroll);
-            return inspector;
+            layout.append(list,details);inspector.append(layout);return inspector;
         }
 
         function renderHealth(server) {
@@ -547,6 +571,7 @@ export function getDashboardScript(): string {
             if (server.error) {
                 const error = node('div', 'server-error', server.error + (server.stale && server.lastSuccessAt
                     ? ' · ' + t('showingSnapshot') + ' ' + new Date(server.lastSuccessAt).toLocaleTimeString() : ''));
+                if(server.nextRetryAt)error.append(node('span','subtle',taskText('Auto retry ','自动重试 ')+new Date(server.nextRetryAt).toLocaleTimeString()));
                 error.append(button(t('retry'), 'error-retry', () => vscode.postMessage({ command: 'refresh' })));
                 band.append(error);
             }
@@ -555,10 +580,8 @@ export function getDashboardScript(): string {
                 const grid = node('div', 'gpu-matrix' + (settings.compactLayout ? ' compact gpu-count-' + columnCount : ''));
                 gpus.forEach(gpu => grid.append(renderGpu(server, gpu, settings)));
                 band.append(grid);
-                const selected = settings.showProcesses && gpus.find(gpu => selectedGpuKey === server.host + ':' + gpu.uuid);
-                if (selected) band.append(renderInspector(server, selected));
             } else if (!server.error) {
-                band.append(node('div', 'empty-state compact-empty', t('noNvidia')));
+                band.append(node('div', 'empty-state compact-empty', server.hiddenGpuCount ? taskText('All GPUs are hidden in Settings → Servers.','GPU 已全部隐藏，可在设置 → 服务器中调整。') : t('noNvidia')));
             }
             return band;
         }
@@ -615,6 +638,18 @@ export function getDashboardScript(): string {
                 }
             }
             patchChildren(content, fragment);
+            const filtered=Boolean(searchInput.value.trim()||statusFilter.value!=='all'||sortSelect.value!=='configured'||Number(minMemory.value)>0||Number(minGpus.value)>1||selectedUser);
+            resetFiltersButton.hidden=!filtered;
+            document.getElementById('filter-results').textContent=visibleGpuCount+' GPU';
+            for(const item of summaryRoot.querySelectorAll('[data-filter]'))item.setAttribute('aria-pressed',String(statusFilter.value===item.dataset.filter));
+            const details=document.createDocumentFragment();
+            const selectedServer=currentMessage.settings.showProcesses&&currentMessage.data.find(server=>server.gpus.some(gpu=>selectedGpuKey===server.host+':'+gpu.uuid));
+            if(selectedServer)details.append(renderInspector(selectedServer,selectedServer.gpus.find(gpu=>selectedGpuKey===selectedServer.host+':'+gpu.uuid)));
+            else if(detailSidebar.contains(document.activeElement))searchInput.focus({preventScroll:true});
+            const previousDetail=detailSidebar.firstElementChild?.dataset.key;
+            patchChildren(detailSidebar,details);detailSidebar.hidden=!selectedServer;
+            if(previousDetail!==detailSidebar.firstElementChild?.dataset.key)detailSidebar.scrollTop=0;
+            document.getElementById('dashboard-layout').classList.toggle('details-open',Boolean(selectedServer));
             const myUser = currentMessage.preferences && currentMessage.preferences.researchUser;
             myTasksButton.setAttribute('aria-pressed', String(Boolean(myUser && selectedUser === myUser)));
             if (vscode.setState) vscode.setState({ search: searchInput.value, status: statusFilter.value, sort: sortSelect.value,
@@ -626,7 +661,7 @@ export function getDashboardScript(): string {
             currentMessage = message;
             language = message.language === 'zh-CN' ? 'zh-CN' : 'en';
             applyStaticLanguage();
-            pageTitle.replaceChildren(icon('cpu'), document.createTextNode(message.title));
+            pageTitle.replaceChildren(icon('fleet'), document.createTextNode(message.title));
             renderSummary(message.summary, message.settings);
             renderUsers(message.users || []);
             renderFleet();
@@ -644,6 +679,11 @@ export function getDashboardScript(): string {
                 language = message.language === 'zh-CN' ? 'zh-CN' : 'en';
                 applyStaticLanguage();
                 showRefreshState(message.state || 'refreshing', message.completed || 0, message.total || 0);
+            } else if (message.type === 'taskProgress') {
+                taskProgress.set(message.host+':'+message.path,message);renderFleet();
+            } else if (message.type === 'taskEvidence') {
+                taskEvidence.set(message.host+':'+message.uuid+':'+message.pid,message.evidence||{error:message.error});
+                renderFleet();
             } else if (message.type === 'update') {
                 render(message);
             }
@@ -660,6 +700,7 @@ export function getDashboardCss(): string {
     return `
         :root { color-scheme: light dark; }
         * { box-sizing: border-box; }
+        [hidden] { display:none !important; }
         body { margin: 0; padding: 14px 16px 28px; color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
         button, input, select, textarea { font: inherit; }
         button { min-height: 28px; padding: 4px 10px; border: 1px solid transparent; border-radius: 4px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); cursor: pointer; }
@@ -674,15 +715,23 @@ export function getDashboardCss(): string {
         .secondary-button { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
         .secondary-button:hover { background: var(--vscode-button-secondaryHoverBackground); }
         .compact-button { min-height: 24px; padding: 2px 7px; font-size: 10px; }
-        .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 42px; border-bottom: 1px solid var(--vscode-widget-border); }
-        .toolbar h1 { display: flex; align-items: center; gap: 7px; margin: 0 0 2px; font-size: 14px; }
+        .toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; min-height:56px; margin-bottom:10px; }
+        .toolbar h1 { display:flex; align-items:center; gap:8px; margin:0 0 5px; font-size:17px; font-weight:600; letter-spacing:-.3px; }
+        .toolbar h1 .icon { width:22px; height:22px; flex-basis:22px; }
+        .product-meta { display:flex; align-items:center; gap:10px; min-height:20px; }
+        .meta-button { display:inline-flex; align-items:center; gap:5px; min-height:20px; padding:1px 6px; font-size:10px; background:transparent; color:var(--vscode-descriptionForeground); border:1px solid var(--vscode-widget-border); border-radius:10px; }
+        .meta-button::before { content:''; width:5px; height:5px; border-radius:50%; background:var(--vscode-descriptionForeground); }
+        .meta-button[data-automatic=true]::before { background:var(--vscode-testing-iconPassed); }
+        .meta-button:hover { background:var(--vscode-list-hoverBackground); color:var(--vscode-foreground); }
         .toolbar-actions, .server-actions, .gpu-actions, .copy-actions { display: flex; align-items: center; gap: 6px; }
         .subtle { color: var(--vscode-descriptionForeground); font-size: 11px; }
         .block { display: block; margin-top: 2px; }
-        .summary-strip { display: grid; grid-template-columns: repeat(6, minmax(90px, 1fr)); border-bottom: 1px solid var(--vscode-widget-border); }
-        .summary-item { --meter-color: var(--vscode-charts-blue); display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 8px 12px 9px; border-right: 1px solid var(--vscode-widget-border); }
+        .summary-strip { display:grid; grid-template-columns:1.25fr repeat(5,minmax(90px,1fr)); border:1px solid var(--vscode-widget-border); border-radius:6px; overflow:hidden; background:color-mix(in srgb,var(--vscode-sideBar-background) 35%,var(--vscode-editor-background)); }
+        .summary-item { --meter-color:var(--vscode-charts-blue); display:flex; flex-direction:column; gap:5px; min-width:0; min-height:92px; padding:12px 14px; border:0; border-radius:0; border-right:1px solid var(--vscode-widget-border); background:transparent; color:var(--vscode-foreground); text-align:left; position:relative; }
         .summary-item:last-child { border-right: 0; }
-        .summary-value { overflow: hidden; font-size: 16px; line-height: 1.15; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+        .summary-value { overflow:hidden; font-size:21px; font-weight:600; line-height:1.15; font-variant-numeric:tabular-nums; text-overflow:ellipsis; white-space:nowrap; }
+        .summary-filter:hover { background:var(--vscode-list-hoverBackground); }
+        .summary-filter[aria-pressed=true]::after { content:''; position:absolute; inset:auto 12px 0; height:2px; background:var(--vscode-focusBorder); }
         .summary-detail { overflow: hidden; color: var(--vscode-descriptionForeground); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
         .summary-label, .filter-label { color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 500; }
         .summary-good { --meter-color: var(--vscode-testing-iconPassed); }
@@ -691,19 +740,43 @@ export function getDashboardCss(): string {
         .summary-warning .summary-value { color: var(--vscode-editorWarning-foreground); }
         .visual-meter { display: block; width: 100%; height: 3px; overflow: hidden; border-radius: 2px; background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent); }
         .visual-meter-fill { display: block; height: 100%; border-radius: inherit; background: var(--meter-color, var(--vscode-charts-blue)); transition: width .2s ease; }
-        .summary-meter { margin-top: 2px; }
-        .fleet-controls { display: grid; grid-template-columns: minmax(220px, 1fr) 150px 170px; gap: 7px; padding: 10px 0 7px; }
+        .summary-meter { margin-top:auto; height:2px; }
+        .fleet-filter-panel { border:1px solid var(--vscode-widget-border); border-radius:6px; padding:10px; margin:12px 0; }
+        .fleet-controls { display:grid; grid-template-columns:minmax(180px,1fr) 130px 160px; gap:8px; padding:0 0 9px; }
+        .filter-secondary { display:flex; align-items:center; gap:10px 16px; flex-wrap:wrap; }
+        .filter-actions { display:flex; align-items:center; gap:8px; margin-left:auto; }
+        .filter-actions button { min-height:26px; padding:3px 7px; font-size:11px; }
+        .filter-actions .subtle { white-space:nowrap; }
         input, select, textarea { min-height: 29px; padding: 4px 8px; border: 1px solid var(--vscode-widget-border); border-radius: 4px; color: var(--vscode-input-foreground, var(--vscode-foreground)); background: var(--vscode-input-background); }
-        .resource-controls { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; padding: 0 0 8px; color: var(--vscode-descriptionForeground); font-size: 11px; }
+        .resource-controls { display:flex; align-items:center; gap:8px 10px; flex-wrap:wrap; padding:0; color:var(--vscode-descriptionForeground); font-size:11px; }
         .resource-controls label { display: inline-flex; align-items: center; gap: 6px; }
         .resource-controls input { width: 64px; min-height: 26px; font-size: 11px; font-variant-numeric: tabular-nums; }
         .resource-controls button { display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 3px 6px; font-size: 11px; }
         #my-tasks-button[aria-pressed="true"] { color: var(--vscode-textLink-foreground, var(--vscode-focusBorder)); border-color: var(--vscode-focusBorder); }
-        .user-filters { display: flex; align-items: center; gap: 5px; overflow-x: auto; padding: 0 0 10px; scrollbar-width: thin; }
+        .user-filters { display:flex; align-items:center; gap:5px; overflow-x:auto; flex:1; min-width:180px; scrollbar-width:thin; }
         .filter-label { margin-right: 4px; white-space: nowrap; }
-        .user-chip { min-height: 23px; padding: 2px 7px; color: var(--vscode-foreground); background: var(--vscode-badge-background); font-size: 10px; white-space: nowrap; }
-        .user-chip.active { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+        .user-chip { min-height:24px; padding:2px 7px; color:var(--vscode-descriptionForeground); background:transparent; border:1px solid var(--vscode-widget-border); font-size:10px; white-space:nowrap; }
+        .user-chip:hover { color:var(--vscode-foreground); background:var(--vscode-list-hoverBackground); }
+        .user-chip.active { color:var(--vscode-foreground); background:var(--vscode-list-inactiveSelectionBackground,var(--vscode-button-secondaryBackground)); border-color:var(--vscode-focusBorder); }
         #content { display: grid; gap: 9px; }
+        .dashboard-layout { display:grid; grid-template-columns:minmax(0,1fr); align-items:start; gap:14px; }
+        .dashboard-layout.details-open { grid-template-columns:minmax(0,1fr) minmax(320px,380px); }
+        .gpu-details { position:sticky; top:14px; max-height:calc(100vh - 28px); overflow:auto; min-width:0; border:1px solid var(--vscode-panel-border,var(--vscode-widget-border)); border-radius:6px; background:var(--vscode-sideBar-background,var(--vscode-editor-background)); box-shadow:0 2px 8px var(--vscode-widget-shadow); }
+        .gpu-details[hidden] { display:none; }
+        .gpu-details .process-inspector { margin:0; border:0; border-radius:0; }
+        .gpu-details .inspector-header { position:sticky; top:0; z-index:1; padding:12px; background:var(--vscode-sideBar-background,var(--vscode-editor-background)); }
+        .gpu-details .inspector-header > div { min-width:0; overflow-wrap:anywhere; }
+        .gpu-details .task-inspector-layout { grid-template-columns:minmax(0,1fr); }
+        .gpu-details .task-list { max-height:180px; border-right:0; border-bottom:1px solid var(--vscode-widget-border); }
+        .gpu-details .task-details { max-height:none; overflow:visible; background:var(--vscode-editor-background); border-top:1px solid var(--vscode-widget-border); }
+        .gpu-details .task-primary-actions, .gpu-details .dialog-actions { flex-wrap:wrap; }
+        .gpu-details .inspector-empty { padding:12px; }
+        #content { container-type:inline-size; }
+        @container(max-width:850px) { .gpu-matrix.compact[class*="gpu-count-"] { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+        @media(max-width:1000px) {
+            .dashboard-layout.details-open { grid-template-columns:minmax(0,1fr); }
+            .gpu-details { position:fixed; inset:12px 12px 12px auto; width:min(420px,calc(100vw - 24px)); max-height:none; z-index:20; box-shadow:0 6px 24px var(--vscode-widget-shadow); }
+        }
         .server-band { min-width: 0; overflow: hidden; border: 1px solid var(--vscode-widget-border); border-left: 2px solid var(--vscode-widget-border); border-radius: 4px; background: var(--vscode-editor-background); }
         .server-band.stale { border-left-color: var(--vscode-editorWarning-foreground); }
         .server-band.offline, .server-band.offline.stale { border-left-color: var(--vscode-descriptionForeground); opacity: .82; }
@@ -772,12 +845,20 @@ export function getDashboardCss(): string {
         .inspector-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 9px; border-bottom: 1px solid var(--vscode-widget-border); }
         .inspector-empty, .empty-state { padding: 20px; color: var(--vscode-descriptionForeground); text-align: center; }
         .process-scroll { max-height: 260px; overflow: auto; }
-        .process-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 10px; }
-        .process-table th, .process-table td { overflow: hidden; padding: 5px 7px; border-bottom: 1px solid var(--vscode-widget-border); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-        .process-table th { position: sticky; top: 0; z-index: 1; color: var(--vscode-descriptionForeground); background: var(--vscode-editor-background); font-size: 9px; text-transform: uppercase; }
-        .process-table th:first-child { width: 34%; }
-        .process-table th:nth-child(6) { width: 18%; }
-        .process-table th:last-child { width: 82px; }
+        .task-primary-actions { display:flex; gap:6px; padding:8px 12px; border-bottom:1px solid var(--vscode-widget-border); }
+        .task-inspector-layout { display:grid; grid-template-columns:minmax(180px,30%) minmax(0,1fr); }
+        .task-list { padding:6px; border-right:1px solid var(--vscode-widget-border); max-height:360px; overflow:auto; }
+        .task-row { display:grid; width:100%; gap:4px; text-align:left; padding:9px 10px; border-radius:4px; color:var(--vscode-foreground); background:transparent; font-size:11px; }
+        .task-row[aria-pressed="true"] { background:var(--vscode-list-inactiveSelectionBackground); outline:1px solid var(--vscode-focusBorder); outline-offset:-1px; }
+        .task-entrypoint { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--vscode-editor-font-family); }
+        .task-details { padding:12px; min-width:0; max-height:420px; overflow:auto; font-size:12px; }
+        .task-command { white-space:pre-wrap; overflow-wrap:anywhere; padding:10px; background:var(--vscode-textCodeBlock-background); font-size:11px; line-height:1.6; user-select:text; }
+        .task-parent { padding:8px 0; border-top:1px solid var(--vscode-widget-border); overflow-wrap:anywhere; }
+        .task-parent code { white-space:pre-wrap; font-size:11px; margin:5px 0; }
+        .task-ended { color:var(--vscode-editorWarning-foreground); }
+        .task-sample-time { display:block; padding:6px 12px; }
+        @media(max-width:680px) { .task-inspector-layout { grid-template-columns:1fr; } .task-list { max-height:150px; border-right:0; border-bottom:1px solid var(--vscode-widget-border); } }
+
         .numeric { text-align: right !important; }
         .table-button { min-height: 20px; padding: 1px 5px; color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); font-size: 9px; }
         .compact-empty { padding: 12px; }
@@ -802,7 +883,6 @@ export function getDashboardCss(): string {
             .server-header { display: grid; }
             .server-actions { justify-content: flex-start; }
             .gpu-matrix, .gpu-matrix.compact[class*="gpu-count-"] { grid-template-columns: 1fr; }
-            .process-table th:first-child { width: 26%; }
         }
         @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
         ${getDialogCss()}
