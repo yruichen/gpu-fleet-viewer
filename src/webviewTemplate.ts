@@ -1,5 +1,8 @@
 import en = require('./locales/en.json');
 import zhCN = require('./locales/zh-CN.json');
+import lineIcons = require('./lineIcons.json');
+import { getDialogCss, getPreferencesScript } from './preferencesView';
+import { getAssistantCss, getAssistantScript } from './assistantView';
 
 const dashboardTranslations = { en, 'zh-CN': zhCN };
 
@@ -21,13 +24,40 @@ export function getDashboardScript(): string {
         const languageButton = document.getElementById('language-button');
         const refreshButton = document.getElementById('refresh-button');
         const settingsButton = document.getElementById('settings-button');
+        const assistantButton = document.getElementById('assistant-button');
+        const minMemory = document.getElementById('min-memory');
+        const minGpus = document.getElementById('min-gpus');
+        const myTasksButton = document.getElementById('my-tasks-button');
+        const resetFiltersButton = document.getElementById('reset-filters-button');
+        const savedState = vscode.getState ? vscode.getState() || {} : {};
         let currentMessage;
-        let selectedGpuKey;
-        let selectedUser = '';
-        let offlineExpanded = false;
+        let selectedGpuKey = savedState.selectedGpuKey;
+        let selectedUser = savedState.selectedUser || '';
+        let offlineExpanded = Boolean(savedState.offlineExpanded);
         let language = 'en';
+        let refreshStatus = { state: 'idle', completed: 0, total: 0 };
+        let visibleGpuCount = 0;
 
         const translations = ${JSON.stringify(dashboardTranslations)};
+        const icons = ${JSON.stringify(lineIcons)};
+        const returnFocus = new WeakMap();
+
+        function icon(name) {
+            const element = document.createElement('span');
+            element.className = 'icon';
+            element.setAttribute('aria-hidden', 'true');
+            element.innerHTML = icons[name] || '';
+            return element;
+        }
+        function openDialog(dialog) {
+            returnFocus.set(dialog, document.activeElement);
+            dialog.onclose = () => { const previous = returnFocus.get(dialog); if (previous && previous.isConnected) previous.focus(); };
+            if (dialog.showModal) dialog.showModal(); else dialog.setAttribute('open', '');
+        }
+        function closeDialog(dialog) {
+            if (dialog.close) dialog.close();
+            else { dialog.removeAttribute('open'); dialog.dispatchEvent(new Event('close')); }
+        }
 
         function t(key) {
             return translations[language][key] || translations.en[key] || key;
@@ -55,9 +85,16 @@ export function getDashboardScript(): string {
             document.documentElement.lang = language;
             languageButton.textContent = t('languageButton');
             languageButton.title = t('switchLanguage');
-            settingsButton.textContent = t('settings');
-            refreshButton.textContent = t('refresh');
+            settingsButton.replaceChildren(icon('settings-2'), document.createTextNode(t('settings')));
+            assistantButton.replaceChildren(icon('sparkles'), document.createTextNode(t('assistant')));
+            refreshButton.replaceChildren(icon('refresh-cw'), document.createTextNode(t('refresh')));
+            document.getElementById('min-memory-label').textContent = t('minFreeMemory');
+            document.getElementById('min-gpus-label').textContent = t('matchingGpus');
+            myTasksButton.replaceChildren(icon('user'), document.createTextNode(t('myTasks')));
+            myTasksButton.setAttribute('aria-pressed', String(Boolean(currentMessage && currentMessage.preferences && currentMessage.preferences.researchUser && selectedUser === currentMessage.preferences.researchUser)));
+            resetFiltersButton.replaceChildren(icon('rotate-ccw'), document.createTextNode(t('resetFilters')));
             searchInput.placeholder = t('search');
+            searchInput.setAttribute('aria-label', t('search'));
             setOptionLabel(statusFilter, 'all', t('allGpus'));
             setOptionLabel(statusFilter, 'available', t('available'));
             setOptionLabel(statusFilter, 'busy', t('busy'));
@@ -70,6 +107,7 @@ export function getDashboardScript(): string {
         }
 
         function showRefreshState(state, completed, total) {
+            refreshStatus = { state, completed, total };
             const active = state === 'refreshing' || state === 'queued';
             refreshButton.classList.toggle('refreshing', active);
             refreshButton.setAttribute('aria-busy', String(active));
@@ -81,17 +119,44 @@ export function getDashboardScript(): string {
             } else if (state === 'refreshing') {
                 const progressText = total ? ' ' + completed + '/' + total : '';
                 refreshState.textContent = t('refreshing') + progressText;
+            } else if (currentMessage) {
+                refreshState.textContent = t('updated') + ' ' + new Date(currentMessage.summary.updatedAt).toLocaleTimeString() +
+                    ' · ' + visibleGpuCount + ' ' + t('shown');
             }
         }
 
         refreshButton.addEventListener('click', () => vscode.postMessage({ command: 'refresh' }));
-        settingsButton.addEventListener('click', () => vscode.postMessage({ command: 'settings' }));
+        settingsButton.addEventListener('click', () => window.dispatchEvent(new Event('openPreferences')));
+        assistantButton.addEventListener('click', () => window.dispatchEvent(new Event('openAssistant')));
         languageButton.addEventListener('click', () => vscode.postMessage({
             command: 'setLanguage', language: language === 'zh-CN' ? 'en' : 'zh-CN'
         }));
         searchInput.addEventListener('input', () => renderFleet());
         statusFilter.addEventListener('change', () => renderFleet());
         sortSelect.addEventListener('change', () => renderFleet());
+        minMemory.addEventListener('input', () => renderFleet());
+        minGpus.addEventListener('input', () => renderFleet());
+        searchInput.value = typeof savedState.search === 'string' ? savedState.search : '';
+        statusFilter.value = savedState.status || 'all';
+        sortSelect.value = savedState.sort || 'configured';
+        minMemory.value = Number(savedState.minMemory) || 0;
+        minGpus.value = Math.max(1, Number(savedState.minGpus) || 1);
+        myTasksButton.addEventListener('click', () => {
+            const user = currentMessage && currentMessage.preferences && currentMessage.preferences.researchUser;
+            if (!user) {
+                window.dispatchEvent(new CustomEvent('openPreferences', { detail: 'servers' }));
+                return;
+            }
+            selectedUser = selectedUser === user ? '' : user;
+            renderUsers(currentMessage.users || []);
+            renderFleet();
+        });
+        resetFiltersButton.addEventListener('click', () => {
+            searchInput.value = ''; statusFilter.value = 'all'; sortSelect.value = 'configured';
+            minMemory.value = '0'; minGpus.value = '1'; selectedUser = '';
+            if (currentMessage) renderUsers(currentMessage.users || []);
+            renderFleet();
+        });
 
         function node(tag, className, text) {
             const element = document.createElement(tag);
@@ -104,11 +169,51 @@ export function getDashboardScript(): string {
             const element = node('button', className, label);
             element.type = 'button';
             if (title) element.title = title;
-            element.addEventListener('click', event => {
+            const iconNames = { [t('openTerminal')]: 'terminal', [t('copyCuda')]: 'copy', [t('connect')]: 'server' };
+            if (iconNames[label]) element.prepend(icon(iconNames[label]));
+            element.onclick = event => {
                 event.stopPropagation();
                 handler();
-            });
+            };
             return element;
+        }
+
+        // Retain mounted nodes so background updates preserve focus, selection,
+        // scroll containers, and progress transitions. Only changed values mutate.
+        function patchChildren(parent, desired) {
+            const previous = Array.from(parent.childNodes);
+            const used = new Set();
+            const keyed = new Map(previous.filter(child => child.nodeType === 1 && child.dataset.key)
+                .map(child => [child.dataset.key, child]));
+            let cursor = parent.firstChild;
+            for (const next of Array.from(desired.childNodes)) {
+                const key = next.nodeType === 1 && next.dataset.key;
+                const current = key ? keyed.get(key) : previous.find(child => !used.has(child) &&
+                    !(child.nodeType === 1 && child.dataset.key) && child.nodeType === next.nodeType && child.nodeName === next.nodeName);
+                let mounted = next;
+                if (current && current.nodeName === next.nodeName) {
+                    mounted = current;
+                    used.add(current);
+                    if (next.nodeType !== 1) {
+                        if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
+                    } else {
+                        for (const attribute of Array.from(current.attributes)) {
+                            if (!next.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+                        }
+                        for (const attribute of Array.from(next.attributes)) {
+                            if (current.getAttribute(attribute.name) !== attribute.value) current.setAttribute(attribute.name, attribute.value);
+                        }
+                        current.onclick = next.onclick;
+                        current.ontoggle = next.ontoggle;
+                        patchChildren(current, next);
+                    }
+                }
+                if (mounted !== cursor) parent.insertBefore(mounted, cursor);
+                cursor = mounted.nextSibling;
+            }
+            for (const child of previous) {
+                if (!used.has(child)) child.remove();
+            }
         }
 
         function number(value) {
@@ -143,9 +248,10 @@ export function getDashboardScript(): string {
                     : minutes + t('minuteShort');
         }
 
-        function progress(value, warning) {
+        function progress(value, warning, label) {
             const track = node('div', 'progress-track');
             track.setAttribute('role', 'progressbar');
+            track.setAttribute('aria-label', label || t('memory'));
             track.setAttribute('aria-valuenow', String(Math.round(value)));
             track.setAttribute('aria-valuemin', '0');
             track.setAttribute('aria-valuemax', '100');
@@ -161,12 +267,13 @@ export function getDashboardScript(): string {
                 percent(gpu.power.draw, gpu.power.limit) >= settings.powerWarningThreshold;
         }
 
-        function visualMeter(value, className) {
+        function visualMeter(value, className, label) {
             const level = Math.min(100, Math.max(0, Number(value) || 0));
             const track = node('span', className || 'visual-meter');
             const fill = node('span', 'visual-meter-fill');
             fill.style.width = level + '%';
             track.setAttribute('role', 'progressbar');
+            track.setAttribute('aria-label', label || t('util'));
             track.setAttribute('aria-valuenow', String(Math.round(level)));
             track.setAttribute('aria-valuemin', '0');
             track.setAttribute('aria-valuemax', '100');
@@ -175,7 +282,6 @@ export function getDashboardScript(): string {
         }
 
         function renderSummary(summary, settings) {
-            summaryRoot.replaceChildren();
             const serverPercent = percent(summary.serversOnline, summary.serversTotal);
             const availablePercent = percent(summary.gpusAvailable, summary.gpusTotal);
             const warningPercent = percent(summary.warnings, summary.gpusTotal);
@@ -203,39 +309,46 @@ export function getDashboardScript(): string {
                     node('span', 'summary-label', summary.label),
                     node('strong', 'summary-value', summary.value),
                     node('span', 'summary-detail', summary.detail),
-                    visualMeter(summary.level, 'visual-meter summary-meter')
+                    visualMeter(summary.level, 'visual-meter summary-meter', summary.label)
                 );
                 fragment.append(item);
             }
-            summaryRoot.append(fragment);
+            patchChildren(summaryRoot, fragment);
         }
 
         function renderUsers(users) {
-            usersRoot.replaceChildren();
+            const fragment = document.createDocumentFragment();
             if (!users.length) {
                 usersRoot.hidden = true;
                 return;
             }
             usersRoot.hidden = false;
-            usersRoot.append(node('span', 'filter-label', t('activeUsers')));
-            usersRoot.append(button(t('all'), selectedUser ? 'user-chip' : 'user-chip active', () => {
+            fragment.append(node('span', 'filter-label', t('activeUsers')));
+            const all = button(t('all'), selectedUser ? 'user-chip' : 'user-chip active', () => {
                 selectedUser = '';
                 renderUsers(currentMessage.users);
                 renderFleet();
-            }));
+            });
+            all.dataset.key = 'all-users';
+            fragment.append(all);
             for (const user of users) {
                 const label = user.user + ' · ' + user.gpuCount + ' GPU · ' + formatMemory(user.memoryMiB);
-                usersRoot.append(button(label, selectedUser === user.user ? 'user-chip active' : 'user-chip', () => {
+                const chip = button(label, selectedUser === user.user ? 'user-chip active' : 'user-chip', () => {
                     selectedUser = selectedUser === user.user ? '' : user.user;
                     renderUsers(currentMessage.users);
                     renderFleet();
-                }));
+                });
+                chip.dataset.key = 'user:' + user.user;
+                chip.setAttribute('aria-pressed', String(selectedUser === user.user));
+                fragment.append(chip);
             }
+            patchChildren(usersRoot, fragment);
         }
 
         function matchesGpu(server, gpu) {
             const query = searchInput.value.trim().toLowerCase();
             const processes = gpu.processes || [];
+            if (number(gpu.memory.free) < Math.max(0, Number(minMemory.value) || 0) * 1024) return false;
             if (selectedUser && !processes.some(process => process.user === selectedUser)) return false;
             if (query) {
                 const haystack = [server.host, server.metadata && server.metadata.alias,
@@ -266,7 +379,8 @@ export function getDashboardScript(): string {
             const item = node('div', warning ? 'metric warning' : 'metric');
             const heading = node('span', 'metric-heading');
             heading.append(node('span', '', label), node('strong', '', value));
-            item.append(heading, visualMeter(level, 'visual-meter metric-meter'));
+            item.append(heading);
+            if (level !== undefined) item.append(visualMeter(level, 'visual-meter metric-meter', label));
             return item;
         }
 
@@ -277,6 +391,7 @@ export function getDashboardScript(): string {
             const selected = selectedGpuKey === key;
             const card = node('article', 'gpu-tile' + (warning ? ' has-warning' : '') +
                 (selected ? ' selected' : '') + (gpu.availability.available ? ' available' : ' busy'));
+            card.dataset.key = key;
 
             const main = button('', 'gpu-main', () => {
                 if (settings.showProcesses) {
@@ -284,6 +399,7 @@ export function getDashboardScript(): string {
                     renderFleet();
                 }
             }, settings.showProcesses ? t('inspectGpu') : gpu.name);
+            main.setAttribute('aria-expanded', String(Boolean(selected && settings.showProcesses)));
             const heading = node('div', 'gpu-heading');
             const identity = node('div', 'gpu-identity');
             identity.append(node('span', 'gpu-index', 'GPU ' + gpu.index), node('strong', 'gpu-name', gpu.name));
@@ -294,8 +410,9 @@ export function getDashboardScript(): string {
             main.append(heading);
 
             const memoryRow = node('div', 'memory-row');
+            memoryRow.title = gpu.memory.used + ' / ' + gpu.memory.total;
             memoryRow.append(node('span', '', t('memory')), node('span', memoryPercent >= settings.memoryWarningThreshold ? 'warning-text' : '',
-                gpu.memory.used + ' / ' + gpu.memory.total));
+                formatMemory(gpu.memory.used) + ' / ' + formatMemory(gpu.memory.total)));
             main.append(memoryRow, progress(memoryPercent, memoryPercent >= settings.memoryWarningThreshold));
 
             const metrics = node('div', 'metrics');
@@ -303,15 +420,18 @@ export function getDashboardScript(): string {
             if (settings.showUtilization) values.push(metric(t('util'), gpu.utilization.gpu, false,
                 number(gpu.utilization.gpu)));
             if (settings.showTemperature) values.push(metric(t('temp'), gpu.temperature.gpu.replace(' C', '°C'),
-                number(gpu.temperature.gpu) >= settings.temperatureWarningThreshold, number(gpu.temperature.gpu)));
+                number(gpu.temperature.gpu) >= settings.temperatureWarningThreshold));
             if (settings.showPower && gpu.power.draw !== 'N/A') values.push(metric(t('power'), gpu.power.draw,
-                percent(gpu.power.draw, gpu.power.limit) >= settings.powerWarningThreshold,
-                percent(gpu.power.draw, gpu.power.limit)));
-            if (settings.showFanSpeed) values.push(metric(t('fan'), gpu.fanSpeed, false, number(gpu.fanSpeed)));
+                percent(gpu.power.draw, gpu.power.limit) >= settings.powerWarningThreshold));
+            if (settings.showFanSpeed) values.push(metric(t('fan'), gpu.fanSpeed, false));
             values.filter(Boolean).forEach(value => metrics.append(value));
             if (metrics.childElementCount) main.append(metrics);
             if (settings.showProcesses) {
-                main.append(node('div', 'process-count', gpu.processes.length + ' ' + (gpu.processes.length === 1 ? t('computeProcess') : t('computeProcesses'))));
+                const users = Array.from(new Set(gpu.processes.map(process => process.user))).join(', ');
+                const processLine = node('div', 'process-count', formatMemory(gpu.memory.free) + ' ' + t('free') + ' · ' +
+                    (users || gpu.processes.length + ' ' + t('processesShort')));
+                processLine.title = users;
+                main.append(processLine);
             }
             card.append(main);
 
@@ -328,6 +448,7 @@ export function getDashboardScript(): string {
 
         function renderInspector(server, gpu) {
             const inspector = node('section', 'process-inspector');
+            inspector.dataset.key = 'inspector:' + gpu.uuid;
             const header = node('header', 'inspector-header');
             const title = node('div');
             title.append(node('strong', '', (server.metadata && server.metadata.alias || server.host) + ' · GPU ' + gpu.index),
@@ -350,6 +471,7 @@ export function getDashboardScript(): string {
             const body = node('tbody');
             for (const process of gpu.processes) {
                 const row = node('tr');
+                row.dataset.key = process.pid;
                 const command = node('td', 'command-cell', process.command || process.name);
                 command.title = process.command || process.name;
                 const slurm = process.slurm ? process.slurm.id + ' · ' + process.slurm.name + ' · ' + process.slurm.state : '—';
@@ -385,7 +507,7 @@ export function getDashboardScript(): string {
                 heading.append(node('small', '', healthMetric.label), node('strong', '', healthMetric.value));
                 item.append(heading);
                 if (healthMetric.level !== undefined) {
-                    item.append(visualMeter(healthMetric.level, 'visual-meter health-meter'));
+                    item.append(visualMeter(healthMetric.level, 'visual-meter health-meter', healthMetric.label));
                 }
                 health.append(item);
             });
@@ -398,6 +520,7 @@ export function getDashboardScript(): string {
 
         function renderServer(server, gpus, settings) {
             const band = node('section', 'server-band' + (server.error ? ' offline' : ' online') + (server.stale ? ' stale' : ''));
+            band.dataset.key = server.host;
             const header = node('header', 'server-header');
             const identity = node('div', 'server-title');
             const nameRow = node('div', 'server-name-row');
@@ -406,7 +529,10 @@ export function getDashboardScript(): string {
             if (server.metadata && server.metadata.group) nameRow.append(node('span', 'tag', server.metadata.group));
             if (server.duplicateOf) nameRow.append(node('span', 'tag duplicate', t('sameHost') + ' ' + server.duplicateOf));
             if (server.slurmAvailable) nameRow.append(node('span', 'tag', 'Slurm'));
-            identity.append(nameRow, node('span', 'subtle', server.error ? t('offline') : server.gpus.length + ' ' + t('gpus') + ' · ' + server.latencyMs + ' ms'));
+            nameRow.prepend(icon('server'));
+            const available = server.gpus.filter(gpu => gpu.availability.available).length;
+            identity.append(nameRow, node('span', 'subtle', server.error ? t('offline') :
+                available + '/' + server.gpus.length + ' ' + t('available') + ' · ' + server.latencyMs + ' ms'));
             const actions = node('div', 'server-actions');
             actions.append(
                 button(server.metadata && server.metadata.favorite ? t('unfavorite') : t('favorite'), 'secondary-button compact-button',
@@ -439,20 +565,22 @@ export function getDashboardScript(): string {
 
         function renderFleet() {
             if (!currentMessage) return;
-            content.replaceChildren();
+            const fragment = document.createDocumentFragment();
             const onlineFragment = document.createDocumentFragment();
             const offlineFragment = document.createDocumentFragment();
-            let visibleGpuCount = 0;
+            visibleGpuCount = 0;
             let onlineCount = 0;
             let offlineCount = 0;
             for (const server of currentMessage.data) {
                 if (statusFilter.value === 'offline' && !server.error) continue;
                 if (server.error && statusFilter.value !== 'all' && statusFilter.value !== 'offline') continue;
                 const gpus = sortedGpus(server.gpus.filter(gpu => matchesGpu(server, gpu)));
+                if (gpus.length < Math.max(1, Number(minGpus.value) || 1) && (Number(minMemory.value) > 0 || Number(minGpus.value) > 1)) continue;
                 const serverQuery = searchInput.value.trim().toLowerCase();
                 const serverMatch = !serverQuery || [server.host, server.metadata && server.metadata.alias,
                     server.metadata && server.metadata.group].filter(Boolean).join(' ').toLowerCase().includes(serverQuery);
-                if (!gpus.length && !(server.error && serverMatch)) continue;
+                const emptyServer = !server.gpus.length && !selectedUser && statusFilter.value === 'all' && serverMatch;
+                if (!gpus.length && !(server.error && serverMatch) && !emptyServer) continue;
                 visibleGpuCount += gpus.length;
                 if (server.error) {
                     offlineCount += 1;
@@ -463,16 +591,17 @@ export function getDashboardScript(): string {
                 }
             }
             if (!onlineCount && !offlineCount) {
-                content.append(node('div', 'empty-state', t('noMatches')));
+                fragment.append(node('div', 'empty-state', t(currentMessage.data.length ? 'noMatches' : 'noServers')));
             } else {
-                if (onlineCount) content.append(onlineFragment);
+                if (onlineCount) fragment.append(onlineFragment);
                 if (offlineCount) {
                     const section = node('details', 'offline-section');
+                    section.dataset.key = 'offline-servers';
                     const forceOpen = statusFilter.value === 'offline' || Boolean(searchInput.value.trim());
                     section.open = forceOpen || offlineExpanded;
-                    section.addEventListener('toggle', () => {
-                        if (!forceOpen) offlineExpanded = section.open;
-                    });
+                    section.ontoggle = event => {
+                        if (!forceOpen) offlineExpanded = event.currentTarget.open;
+                    };
                     const summary = node('summary', 'offline-summary');
                     summary.append(
                         node('span', 'offline-indicator'),
@@ -482,18 +611,22 @@ export function getDashboardScript(): string {
                     const body = node('div', 'offline-list');
                     body.append(offlineFragment);
                     section.append(summary, body);
-                    content.append(section);
+                    fragment.append(section);
                 }
             }
-            refreshState.textContent = t('updated') + ' ' + new Date(currentMessage.summary.updatedAt).toLocaleTimeString() +
-                ' · ' + visibleGpuCount + ' ' + t('shown');
+            patchChildren(content, fragment);
+            const myUser = currentMessage.preferences && currentMessage.preferences.researchUser;
+            myTasksButton.setAttribute('aria-pressed', String(Boolean(myUser && selectedUser === myUser)));
+            if (vscode.setState) vscode.setState({ search: searchInput.value, status: statusFilter.value, sort: sortSelect.value,
+                minMemory: minMemory.value, minGpus: minGpus.value, selectedGpuKey, selectedUser, offlineExpanded });
+            showRefreshState(refreshStatus.state, refreshStatus.completed, refreshStatus.total);
         }
 
         function render(message) {
             currentMessage = message;
             language = message.language === 'zh-CN' ? 'zh-CN' : 'en';
             applyStaticLanguage();
-            pageTitle.textContent = message.title;
+            pageTitle.replaceChildren(icon('cpu'), document.createTextNode(message.title));
             renderSummary(message.summary, message.settings);
             renderUsers(message.users || []);
             renderFleet();
@@ -506,6 +639,7 @@ export function getDashboardScript(): string {
 
         window.addEventListener('message', event => {
             const message = event.data;
+            if (!message || typeof message !== 'object') return;
             if (message.type === 'loading' || message.type === 'refreshState') {
                 language = message.language === 'zh-CN' ? 'zh-CN' : 'en';
                 applyStaticLanguage();
@@ -516,6 +650,8 @@ export function getDashboardScript(): string {
         });
         applyStaticLanguage();
         refreshState.textContent = t('waiting');
+        ${getPreferencesScript()}
+        ${getAssistantScript()}
         vscode.postMessage({ command: 'ready' });
     `;
 }
@@ -525,27 +661,30 @@ export function getDashboardCss(): string {
         :root { color-scheme: light dark; }
         * { box-sizing: border-box; }
         body { margin: 0; padding: 14px 16px 28px; color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
-        button, input, select { font: inherit; }
+        button, input, select, textarea { font: inherit; }
         button { min-height: 28px; padding: 4px 10px; border: 1px solid transparent; border-radius: 4px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); cursor: pointer; }
         button:hover { background: var(--vscode-button-hoverBackground); }
         button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
         button:disabled { cursor: wait; opacity: .65; }
-        #refresh-button.refreshing::before { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border: 1px solid currentColor; border-right-color: transparent; border-radius: 50%; content: ''; vertical-align: -1px; animation: refresh-spin .75s linear infinite; }
+        .icon { display: inline-flex; flex: 0 0 14px; width: 14px; height: 14px; align-items: center; justify-content: center; vertical-align: -2px; }
+        .icon svg { width: 100%; height: 100%; stroke-width: 1.7; }
+        #refresh-button.refreshing .icon { animation: refresh-spin 1.2s linear infinite; }
+        .toolbar-actions button { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
         @keyframes refresh-spin { to { transform: rotate(360deg); } }
         .secondary-button { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
         .secondary-button:hover { background: var(--vscode-button-secondaryHoverBackground); }
         .compact-button { min-height: 24px; padding: 2px 7px; font-size: 10px; }
         .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 42px; border-bottom: 1px solid var(--vscode-widget-border); }
-        .toolbar h1 { margin: 0 0 2px; font-size: 14px; }
+        .toolbar h1 { display: flex; align-items: center; gap: 7px; margin: 0 0 2px; font-size: 14px; }
         .toolbar-actions, .server-actions, .gpu-actions, .copy-actions { display: flex; align-items: center; gap: 6px; }
-        .subtle { color: var(--vscode-descriptionForeground); font-size: 10px; }
+        .subtle { color: var(--vscode-descriptionForeground); font-size: 11px; }
         .block { display: block; margin-top: 2px; }
         .summary-strip { display: grid; grid-template-columns: repeat(6, minmax(90px, 1fr)); border-bottom: 1px solid var(--vscode-widget-border); }
         .summary-item { --meter-color: var(--vscode-charts-blue); display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 8px 12px 9px; border-right: 1px solid var(--vscode-widget-border); }
         .summary-item:last-child { border-right: 0; }
         .summary-value { overflow: hidden; font-size: 16px; line-height: 1.15; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-        .summary-detail { overflow: hidden; color: var(--vscode-descriptionForeground); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-        .summary-label, .filter-label { color: var(--vscode-descriptionForeground); font-size: 9px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
+        .summary-detail { overflow: hidden; color: var(--vscode-descriptionForeground); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+        .summary-label, .filter-label { color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 500; }
         .summary-good { --meter-color: var(--vscode-testing-iconPassed); }
         .summary-good .summary-value { color: var(--vscode-testing-iconPassed); }
         .summary-warning, .summary-caution { --meter-color: var(--vscode-editorWarning-foreground); }
@@ -554,14 +693,18 @@ export function getDashboardCss(): string {
         .visual-meter-fill { display: block; height: 100%; border-radius: inherit; background: var(--meter-color, var(--vscode-charts-blue)); transition: width .2s ease; }
         .summary-meter { margin-top: 2px; }
         .fleet-controls { display: grid; grid-template-columns: minmax(220px, 1fr) 150px 170px; gap: 7px; padding: 10px 0 7px; }
-        input, select { min-height: 29px; padding: 4px 8px; border: 1px solid var(--vscode-widget-border); border-radius: 4px; color: var(--vscode-input-foreground, var(--vscode-foreground)); background: var(--vscode-input-background); }
+        input, select, textarea { min-height: 29px; padding: 4px 8px; border: 1px solid var(--vscode-widget-border); border-radius: 4px; color: var(--vscode-input-foreground, var(--vscode-foreground)); background: var(--vscode-input-background); }
+        .resource-controls { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; padding: 0 0 8px; color: var(--vscode-descriptionForeground); font-size: 11px; }
+        .resource-controls label { display: inline-flex; align-items: center; gap: 6px; }
+        .resource-controls input { width: 64px; min-height: 26px; font-size: 11px; font-variant-numeric: tabular-nums; }
+        .resource-controls button { display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 3px 6px; font-size: 11px; }
+        #my-tasks-button[aria-pressed="true"] { color: var(--vscode-textLink-foreground, var(--vscode-focusBorder)); border-color: var(--vscode-focusBorder); }
         .user-filters { display: flex; align-items: center; gap: 5px; overflow-x: auto; padding: 0 0 10px; scrollbar-width: thin; }
         .filter-label { margin-right: 4px; white-space: nowrap; }
         .user-chip { min-height: 23px; padding: 2px 7px; color: var(--vscode-foreground); background: var(--vscode-badge-background); font-size: 10px; white-space: nowrap; }
         .user-chip.active { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
         #content { display: grid; gap: 9px; }
-        .server-band { min-width: 0; overflow: hidden; border: 1px solid var(--vscode-widget-border); border-left: 3px solid var(--vscode-descriptionForeground); border-radius: 5px; background: var(--vscode-sideBar-background); }
-        .server-band.online { border-left-color: var(--vscode-testing-iconPassed); }
+        .server-band { min-width: 0; overflow: hidden; border: 1px solid var(--vscode-widget-border); border-left: 2px solid var(--vscode-widget-border); border-radius: 4px; background: var(--vscode-editor-background); }
         .server-band.stale { border-left-color: var(--vscode-editorWarning-foreground); }
         .server-band.offline, .server-band.offline.stale { border-left-color: var(--vscode-descriptionForeground); opacity: .82; }
         .offline-section { overflow: hidden; border: 1px solid var(--vscode-widget-border); border-radius: 5px; background: color-mix(in srgb, var(--vscode-sideBar-background) 70%, transparent); }
@@ -572,19 +715,19 @@ export function getDashboardCss(): string {
         .offline-count { min-width: 20px; padding: 1px 6px; border-radius: 9px; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); font-size: 9px; text-align: center; }
         .offline-list { display: grid; gap: 7px; padding: 0 7px 7px; border-top: 1px solid var(--vscode-widget-border); }
         .offline-list .server-band:first-child { margin-top: 7px; }
-        .server-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 11px; border-bottom: 1px solid var(--vscode-widget-border); }
+        .server-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 11px; border-bottom: 1px solid var(--vscode-widget-border); background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent); }
         .server-title { min-width: 0; }
         .server-name-row { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
         .server-name-row h2 { overflow: hidden; margin: 0; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
         .host-alias { color: var(--vscode-descriptionForeground); font-size: 10px; }
         .tag { flex: 0 0 auto; padding: 1px 5px; border-radius: 8px; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); font-size: 9px; }
         .tag.duplicate { color: var(--vscode-editorWarning-foreground); }
-        .host-health { display: flex; align-items: center; gap: 12px; overflow-x: auto; padding: 6px 11px; border-bottom: 1px solid var(--vscode-widget-border); }
+        .host-health { display: flex; align-items: center; gap: 18px; overflow-x: auto; padding: 5px 11px; border-bottom: 1px solid var(--vscode-widget-border); }
         .health-item { --meter-color: var(--vscode-charts-blue); display: grid; gap: 2px; min-width: 58px; white-space: nowrap; }
         .health-item.warning { --meter-color: var(--vscode-editorWarning-foreground); }
         .health-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; }
-        .health-item small { color: var(--vscode-descriptionForeground); font-size: 9px; text-transform: uppercase; }
-        .health-item strong { font-size: 10px; font-variant-numeric: tabular-nums; }
+        .health-item small { color: var(--vscode-descriptionForeground); font-size: 10px; }
+        .health-item strong { font-size: 11px; font-weight: 500; font-variant-numeric: tabular-nums; }
         .health-item.warning strong { color: var(--vscode-editorWarning-foreground); }
         .health-meter { width: 58px; height: 2px; }
         .server-error { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 11px; color: var(--vscode-descriptionForeground); background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent); font-size: 10px; }
@@ -596,34 +739,35 @@ export function getDashboardCss(): string {
         .gpu-matrix.compact.gpu-count-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         .gpu-tile { min-width: 0; overflow: hidden; border: 1px solid var(--vscode-widget-border); border-radius: 4px; background: var(--vscode-editor-background); }
         .gpu-tile.available { border-left: 2px solid var(--vscode-testing-iconPassed); }
-        .gpu-tile.has-warning { border-color: var(--vscode-editorWarning-foreground); }
+        .gpu-tile.has-warning { border-left: 2px solid var(--vscode-editorWarning-foreground); }
         .gpu-tile.selected { border-color: var(--vscode-focusBorder); box-shadow: 0 0 0 1px var(--vscode-focusBorder); }
         .gpu-main { display: block; width: 100%; min-height: 112px; padding: 8px; border: 0; border-radius: 0; color: var(--vscode-foreground); background: transparent; text-align: left; }
         .gpu-main:hover { background: var(--vscode-list-hoverBackground); }
         .gpu-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; margin-bottom: 7px; }
         .gpu-identity { display: flex; align-items: center; gap: 6px; min-width: 0; }
-        .gpu-index { flex: 0 0 auto; color: var(--vscode-descriptionForeground); font-size: 9px; font-weight: 600; }
+        .gpu-index { flex: 0 0 auto; color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 500; }
         .gpu-name { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-        .availability { flex: 0 0 auto; padding: 1px 5px; border-radius: 8px; font-size: 9px; }
-        .availability.available { color: var(--vscode-testing-iconPassed); background: color-mix(in srgb, var(--vscode-testing-iconPassed) 12%, transparent); }
-        .availability.busy { color: var(--vscode-descriptionForeground); background: var(--vscode-badge-background); }
-        .memory-row { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; color: var(--vscode-descriptionForeground); font-size: 9px; }
+        .availability { flex: 0 0 auto; padding: 1px 3px; font-size: 10px; }
+        .availability.available { color: var(--vscode-testing-iconPassed); }
+        .availability.busy { color: var(--vscode-descriptionForeground); }
+        .memory-row { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; color: var(--vscode-descriptionForeground); font-size: 10px; }
         .memory-row span:last-child { color: var(--vscode-foreground); white-space: nowrap; }
-        .progress-track { height: 5px; overflow: hidden; border-radius: 3px; background: var(--vscode-input-background); }
+        .progress-track { height: 3px; overflow: hidden; border-radius: 2px; background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent); }
         .progress-fill { height: 100%; background: var(--vscode-charts-blue); }
         .warning-fill { background: var(--vscode-editorWarning-foreground); }
         .warning-text, .metric.warning strong { color: var(--vscode-editorWarning-foreground); }
-        .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin-top: 7px; }
-        .metric { --meter-color: var(--vscode-charts-blue); display: grid; gap: 3px; min-width: 0; padding: 4px 5px; border-radius: 3px; background: var(--vscode-textCodeBlock-background); font-size: 9px; }
+        .metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 14px; margin-top: 8px; }
+        .metric { --meter-color: var(--vscode-descriptionForeground); display: grid; gap: 3px; min-width: 0; font-size: 11px; }
         .metric.warning { --meter-color: var(--vscode-editorWarning-foreground); }
         .metric-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 3px; min-width: 0; }
         .metric-heading span { overflow: hidden; color: var(--vscode-descriptionForeground); text-overflow: ellipsis; white-space: nowrap; }
         .metric strong { overflow: hidden; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
         .metric-meter { height: 2px; }
-        .process-count { margin-top: 7px; color: var(--vscode-descriptionForeground); font-size: 9px; }
+        .process-count { overflow: hidden; margin-top: 7px; color: var(--vscode-descriptionForeground); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
         .gpu-actions { padding: 5px 7px; border-top: 1px solid var(--vscode-widget-border); }
-        .action-button { min-height: 23px; padding: 2px 7px; color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); font-size: 9px; }
-        .primary-action { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+        .action-button { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 2px 5px; color: var(--vscode-descriptionForeground); background: transparent; font-size: 10px; }
+        .action-button:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
+        .primary-action { color: var(--vscode-testing-iconPassed); }
         .process-inspector { margin: 0 8px 8px; border: 1px solid var(--vscode-widget-border); border-radius: 4px; background: var(--vscode-editor-background); }
         .inspector-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 9px; border-bottom: 1px solid var(--vscode-widget-border); }
         .inspector-empty, .empty-state { padding: 20px; color: var(--vscode-descriptionForeground); text-align: center; }
@@ -649,6 +793,7 @@ export function getDashboardCss(): string {
         @media (max-width: 650px) {
             body { padding: 10px; }
             .toolbar { align-items: flex-start; }
+            .toolbar-actions { flex-wrap: wrap; justify-content: flex-end; }
             .summary-strip { grid-template-columns: repeat(2, minmax(90px, 1fr)); }
             .summary-item:nth-child(3) { border-right: 1px solid var(--vscode-widget-border); }
             .summary-item:nth-child(even) { border-right: 0; }
@@ -659,5 +804,8 @@ export function getDashboardCss(): string {
             .gpu-matrix, .gpu-matrix.compact[class*="gpu-count-"] { grid-template-columns: 1fr; }
             .process-table th:first-child { width: 26%; }
         }
+        @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
+        ${getDialogCss()}
+        ${getAssistantCss()}
     `;
 }

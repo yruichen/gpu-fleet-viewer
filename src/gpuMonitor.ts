@@ -1,5 +1,7 @@
 import * as cp from 'child_process';
 import * as xml2js from 'xml2js';
+import * as path from 'path';
+import * as os from 'os';
 
 export interface SlurmJobInfo {
     id: string;
@@ -50,6 +52,7 @@ export interface ServerSnapshot {
 }
 
 export interface MonitorOptions {
+    sshConfigPath?: string;
     timeoutSeconds: number;
     includeProcessOwners: boolean;
     includeProcesses?: boolean;
@@ -84,7 +87,7 @@ export class GpuMonitor {
         const timeoutSeconds = Math.max(2, Math.min(options.timeoutSeconds, 60));
         const startedAt = Date.now();
         const remoteCommand = this.buildRemoteCommand(options);
-        const stdout = await this.execSsh(host, remoteCommand, timeoutSeconds);
+        const stdout = await this.execSsh(host, remoteCommand, timeoutSeconds, options.sshConfigPath);
         const sections = this.splitSections(stdout);
         const processDetails = this.parseProcessDetails(sections.details || '');
         const slurm = this.parseSlurm(
@@ -302,9 +305,13 @@ export class GpuMonitor {
         ].join('; ');
     }
 
-    private execSsh(host: string, remoteCommand: string, timeoutSeconds: number): Promise<string> {
+    private execSsh(host: string, remoteCommand: string, timeoutSeconds: number, configPath?: string): Promise<string> {
+        const configArgs = configPath && configPath !== '~/.ssh/config'
+            ? ['-F', configPath.startsWith('~/') ? path.join(os.homedir(), configPath.slice(2)) : configPath]
+            : [];
         return new Promise((resolve, reject) => {
             cp.execFile('ssh', [
+                ...configArgs,
                 '-o', 'BatchMode=yes',
                 '-o', `ConnectTimeout=${timeoutSeconds}`,
                 host,

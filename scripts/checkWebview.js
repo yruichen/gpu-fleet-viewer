@@ -22,10 +22,6 @@ async function main() {
     assert.strictEqual(dom.window.document.querySelectorAll('.server-band').length, 4);
     assert.strictEqual(dom.window.document.querySelectorAll('.gpu-tile').length, 14);
     assert.ok(dom.window.document.querySelectorAll('.host-health').length >= 4);
-    assert.ok(dom.window.document.querySelectorAll('.user-chip').length >= 4);
-    assert.strictEqual(dom.window.document.querySelectorAll('.summary-meter').length, 6);
-    assert.ok(dom.window.document.querySelectorAll('.metric-meter').length > 20);
-    assert.ok(dom.window.document.querySelectorAll('.health-meter').length >= 8);
     assert.match(dom.window.document.getElementById('refresh-state').textContent, /^Updated /);
 
     dom.window.document.getElementById('language-button').click();
@@ -46,6 +42,19 @@ async function main() {
     const selectedBand = dom.window.document.querySelectorAll('.server-band')[2];
     assert.strictEqual(selectedBand.querySelectorAll('.process-inspector').length, 1);
     assert.strictEqual(selectedBand.querySelectorAll('.process-table tbody tr').length, 7);
+    const focusedGpu = selectedBand.querySelectorAll('.gpu-main')[1];
+    focusedGpu.focus();
+    const processScroll = selectedBand.querySelector('.process-scroll');
+    processScroll.scrollTop = 80;
+    const processRow = selectedBand.querySelector('.process-table tbody tr');
+    dom.window.__gpuPreview.data[2].gpus[1].processes[0].elapsedSeconds = 18500;
+    dom.window.postMessage(dom.window.__gpuPreview, '*');
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(selectedBand.isConnected, 'Refreshing must retain the server section.');
+    assert.strictEqual(dom.window.document.activeElement, focusedGpu, 'Refreshing must retain keyboard focus.');
+    assert.strictEqual(selectedBand.querySelector('.process-scroll'), processScroll);
+    assert.strictEqual(processScroll.scrollTop, 80, 'Refreshing must retain inspector scroll position.');
+    assert.strictEqual(selectedBand.querySelector('.process-table tbody tr'), processRow);
     selectedBand.querySelector('.inspector-header button').click();
     assert.strictEqual(dom.window.document.querySelectorAll('.process-inspector').length, 0);
 
@@ -54,6 +63,11 @@ async function main() {
     search.dispatchEvent(new dom.window.Event('input'));
     assert.strictEqual(dom.window.document.querySelectorAll('.server-band').length, 1);
     assert.strictEqual(dom.window.document.querySelectorAll('.gpu-tile').length, 2);
+    dom.window.postMessage({ type: 'refreshState', state: 'refreshing', completed: 1, total: 4 }, '*');
+    await new Promise(resolve => setTimeout(resolve, 10));
+    search.value = '409';
+    search.dispatchEvent(new dom.window.Event('input'));
+    assert.match(dom.window.document.getElementById('refresh-state').textContent, /1\/4$/, 'Filtering must retain refresh progress.');
     search.value = '';
     search.dispatchEvent(new dom.window.Event('input'));
 
@@ -65,6 +79,50 @@ async function main() {
 
     status.value = 'all';
     status.dispatchEvent(new dom.window.Event('change'));
+    const minMemory = dom.window.document.getElementById('min-memory');
+    const minGpus = dom.window.document.getElementById('min-gpus');
+    minMemory.value = '40';
+    minMemory.dispatchEvent(new dom.window.Event('input'));
+    minGpus.value = '2';
+    minGpus.dispatchEvent(new dom.window.Event('input'));
+    assert.strictEqual(dom.window.document.querySelectorAll('.server-band').length, 2, 'Find two GPUs with at least 40 GiB each on one server.');
+    assert.strictEqual(dom.window.document.querySelectorAll('.gpu-tile').length, 4);
+    minGpus.value = '3';
+    minGpus.dispatchEvent(new dom.window.Event('input'));
+    assert.strictEqual(dom.window.document.querySelectorAll('.gpu-tile').length, 0);
+    dom.window.document.getElementById('reset-filters-button').click();
+    assert.strictEqual(dom.window.document.querySelectorAll('.gpu-tile').length, 14);
+    dom.window.document.getElementById('my-tasks-button').click();
+    assert.strictEqual(dom.window.document.querySelectorAll('.gpu-tile').length, 3);
+    dom.window.document.getElementById('reset-filters-button').click();
+
+    dom.window.document.getElementById('settings-button').click();
+    const preferences = dom.window.document.getElementById('preferences-dialog');
+    assert.strictEqual(preferences.open, true);
+    const interval = dom.window.document.getElementById('pref-refreshInterval');
+    interval.value = '12';
+    interval.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    dom.window.postMessage(dom.window.__gpuPreview, '*');
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.strictEqual(dom.window.document.getElementById('pref-refreshInterval'), interval);
+    assert.strictEqual(interval.value, '12', 'Metric refresh must retain unsaved settings.');
+    dom.window.document.getElementById('preferences-form').dispatchEvent(new dom.window.Event('submit', { cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const saved = dom.window.__gpuMessages.findLast(message => message.command === 'savePreferences');
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(saved.values)), { refreshInterval: 12 }, 'Only edited fields should be saved.');
+    dom.window.document.getElementById('preferences-close').click();
+    assert.strictEqual(preferences.open, false);
+
+    dom.window.document.getElementById('assistant-button').click();
+    const assistant = dom.window.document.getElementById('assistant-dialog');
+    assert.strictEqual(assistant.open, true);
+    assert.strictEqual(dom.window.__gpuMessages.filter(message => message.command === 'askAi').length, 0);
+    dom.window.postMessage({ type: 'aiResult', answer: '<img src=x onerror=alert(1)>Plain answer' }, '*');
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.strictEqual(assistant.querySelectorAll('.chat-text img').length, 0, 'Model output must stay plain text.');
+    assert.ok(assistant.querySelector('.chat-text').textContent.includes('<img'));
+    dom.window.document.getElementById('assistant-close').click();
+
     dom.window.__gpuPreview.data.push({
         host: 'offline-node', gpus: [], collectedAt: Date.now(), latencyMs: 8000,
         stale: false, error: 'Server is unreachable.', errorCategory: 'unreachable'
@@ -82,6 +140,7 @@ async function main() {
     status.dispatchEvent(new dom.window.Event('change'));
     assert.strictEqual(dom.window.document.querySelector('.offline-section').open, true);
     assert.strictEqual(dom.window.document.querySelectorAll('.server-band').length, 1);
+    assert.deepStrictEqual(errors, []);
     console.log('Webview rendered, filtered, and inspected the research fleet without script errors.');
     dom.window.close();
 }

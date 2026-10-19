@@ -7,3 +7,7 @@ https://github.com/Riku-0801/gpu-server-observer
 The upstream work and this derivative work are distributed under the Apache
 License, Version 2.0. The source, interface, monitoring, configuration, and
 test files in this repository have been modified for GPU Fleet Viewer.
+
+The dashboard includes selected Lucide line icons, version 0.468.0:
+https://lucide.dev/
+Their license is included in resources/LUCIDE-LICENSE.

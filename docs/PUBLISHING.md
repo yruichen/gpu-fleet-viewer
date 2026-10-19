@@ -1,6 +1,6 @@
 # Publishing
 
-Keep the npm package version, Visual Studio Marketplace version, Git tag, and GitHub Release synchronized. The `Marketplace Release` GitHub Actions workflow publishes both the Marketplace package and GitHub Release asset from a version tag.
+Keep the package version, Visual Studio Marketplace version, Git tag, and GitHub Release synchronized. The `Marketplace Release` workflow publishes a new stable package version when it is merged into `main`, then creates the matching GitHub tag and Release. Matching version tags and manual workflow runs are also supported.
 
 ## One-time GitHub setup
 
@@ -19,8 +19,12 @@ Never place the token in source files, workflow YAML, release notes, or shell hi
 4. Build the VSIX with `npx vsce package` and inspect its file list.
 5. Open a pull request and wait for the required `test` check to pass.
 6. Merge the pull request and update the local `main` branch.
-7. Create and push the matching version tag, for example `git tag v1.2.0 && git push origin v1.2.0`.
-8. Watch the **Marketplace Release** workflow. It validates the version, runs tests and the production audit, packages the VSIX, publishes it to the Marketplace, and creates the GitHub Release.
+7. The push to `main` automatically triggers **Marketplace Release**. No manual version tag is needed. A commit that retains an already tagged version is skipped.
+8. Watch the workflow. It validates the version, runs tests and the production audit, packages the VSIX, publishes it to the Marketplace, and creates the matching GitHub Release and version tag for the packaged commit.
 9. Verify the Marketplace page and install the public extension ID in a clean VS Code profile.
 
 If the workflow stops at **Verify Marketplace credential**, configure or rotate `VSCE_PAT` and re-run the failed job. A tag whose version differs from `package.json` is rejected before publishing.
+
+If publishing succeeds but GitHub Release creation fails, re-run the job from the same commit or tag. `--skip-duplicate` skips the already published Marketplace version and continues with the GitHub asset. Publication is serialized across release events. The token is provided only to the credential check and Marketplace publishing step.
+
+To publish from a tag explicitly, push a matching tag such as `v1.3.0`. Manual runs must target `main` or a matching version tag. Never move an existing release tag or reuse a version for different code; increment the package version instead. Users receive Marketplace updates according to their VS Code extension auto-update settings.

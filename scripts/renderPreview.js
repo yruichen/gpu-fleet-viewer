@@ -11,6 +11,7 @@ Module._load = function load(request, parent, isMain) {
 };
 
 const { GpuViewPanel } = require('../out/gpuView');
+const { preferenceFields } = require('../out/preferences');
 const panel = Object.create(GpuViewPanel.prototype);
 let html = panel.getWebviewContent();
 const nonce = html.match(/<script nonce="([^"]+)">/)[1];
@@ -108,6 +109,8 @@ const data = [
 
 const previewMessage = {
     type: 'update',
+    preferences: { ...Object.fromEntries(preferenceFields.map(field => [field.key, field.default])), researchUser: 'alice' },
+    aiConfigured: false,
     title: 'Fleet Summary',
     data,
     settings: {
@@ -179,6 +182,7 @@ html = html.replace('</head>', `${theme}</head>`);
 html = html.replace(
     'const vscode = acquireVsCodeApi();',
     `const vscode = { postMessage(message) {
+        (window.__gpuMessages ||= []).push(message);
         if (message.command === 'refresh') {
             window.__gpuPreview.summary.updatedAt = Date.now();
             window.postMessage(window.__gpuPreview, '*');
@@ -186,6 +190,10 @@ html = html.replace(
             document.getElementById('refresh-state').textContent = 'Connect requested for ' + message.host;
         } else if (message.command === 'settings') {
             document.getElementById('refresh-state').textContent = 'Settings command requested';
+        } else if (message.command === 'savePreferences') {
+            Object.assign(window.__gpuPreview.preferences, message.values);
+            window.postMessage({ type: 'preferencesResult', success: true, values: message.values }, '*');
+            window.postMessage(window.__gpuPreview, '*');
         } else if (message.command === 'setLanguage') {
             window.__gpuPreview.language = message.language;
             window.__gpuPreview.title = message.language === 'zh-CN' ? '科研 GPU 集群' : 'Fleet Summary';
