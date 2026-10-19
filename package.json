@@ -12,7 +12,7 @@
 	},
 	"author": "yruichen",
 	"license": "Apache-2.0",
-	"version": "1.4.0",
+	"version": "1.4.1",
 	"icon": "resources/icon.png",
 	"publisher": "yruichen",
 	"pricing": "Free",
@@ -362,10 +362,10 @@
 				},
 				"gpu-fleet-viewer.ai.timeoutSeconds": {
 					"type": "number",
-					"default": 60,
+					"default": 120,
 					"minimum": 5,
-					"maximum": 300,
-					"description": "Timeout for an AI response in seconds.",
+					"maximum": 900,
+					"description": "Timeout for each model response in seconds; not a total investigation time limit.",
 					"scope": "application"
 				},
 				"gpu-fleet-viewer.visibleGpus": {
@@ -379,6 +379,30 @@
 						}
 					},
 					"description": "Visible GPU indices or UUIDs per SSH host. Omitted host = all GPUs; empty list = none. Affects dashboard and default AI scope, not existing reminders."
+				},
+				"gpu-fleet-viewer.ai.maxToolCalls": {
+					"type": "integer",
+					"default": 0,
+					"minimum": 0,
+					"maximum": 10000,
+					"description": "Tool calls per turn; 0 means no fixed count limit. A configured cap pauses with continuation.",
+					"scope": "application"
+				},
+				"gpu-fleet-viewer.ai.logTailLines": {
+					"type": "integer",
+					"default": 500,
+					"minimum": 20,
+					"maximum": 10000,
+					"description": "Maximum task log tail lines per read.",
+					"scope": "application"
+				},
+				"gpu-fleet-viewer.ai.logTailKiB": {
+					"type": "integer",
+					"default": 256,
+					"minimum": 16,
+					"maximum": 2048,
+					"description": "Maximum task log tail read size in KiB. Exact-file authorization still applies.",
+					"scope": "application"
 				}
 			}
 		}

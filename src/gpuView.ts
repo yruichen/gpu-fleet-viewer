@@ -253,7 +253,7 @@ export class GpuViewPanel {
 
     private async handleConfigurationChange(event: vscode.ConfigurationChangeEvent): Promise<void> {
         if (this.savingPreferences) return;
-        if (event.affectsConfiguration('gpu-fleet-viewer.ai')) this.assistant.reset();
+        if (this.affectsAny(event,['ai.protocol','ai.baseUrl','ai.model'])) this.assistant.reset();
         if (this.affectsAny(event, AUTO_REFRESH_KEYS)) {
             this.scheduleAutoRefresh();
         }
@@ -281,7 +281,7 @@ export class GpuViewPanel {
             try {
                 for (const [key, value] of entries) await config.update(key, value, vscode.ConfigurationTarget.Global);
             } finally { this.savingPreferences = false; }
-            if (entries.some(([key]) => key.startsWith('ai.'))) this.assistant.reset();
+            if (entries.some(([key]) => ['ai.protocol','ai.baseUrl','ai.model'].includes(key))) this.assistant.reset();
             if (entries.some(([key]) => key === 'sshConfigPath')) {
                 this.duplicateAliases.clear(); this.lastSuccessful.clear(); GpuViewPanel.snapshotCache.clear();
             }
@@ -828,7 +828,10 @@ export class GpuViewPanel {
                 <button id="reset-filters-button" class="text-button" type="button"></button>
             </section>
             <section id="user-filters" class="user-filters" aria-label="Active users"></section>
-            <main id="content"><div class="empty-state"></div></main>
+            <div id="dashboard-layout" class="dashboard-layout">
+                <main id="content"><div class="empty-state"></div></main>
+                <aside id="gpu-details" class="gpu-details" aria-labelledby="gpu-details-title" hidden></aside>
+            </div>
             ${getPreferencesHtml()}
             ${getAssistantHtml()}
             <script nonce="${nonce}">${getDashboardScript()}</script>

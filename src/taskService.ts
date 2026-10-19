@@ -93,14 +93,16 @@ export class TaskService implements vscode.Disposable {
         return markDuplicateServers(all.flatMap(h => result.filter(s => s.host===h.host)));
     }
     private assertActive(signal?: AbortSignal) { if (signal?.aborted || this.disposed) throw new Error('Request cancelled.'); }
-    async query(id: string, kind: TaskQuery, args: Record<string,unknown>, signal?: AbortSignal): Promise<any> {
+    logLimits(){const c=vscode.workspace.getConfiguration('gpu-fleet-viewer');return {lines:Math.max(20,Math.min(10000,c.get<number>('ai.logTailLines',500))),maxBytes:Math.max(16,Math.min(2048,c.get<number>('ai.logTailKiB',256)))*1024};}
+    async query(id: string, kind: TaskQuery, args: Record<string,unknown>, signal?: AbortSignal, allowOnce=false): Promise<any> {
         this.assertActive(signal);
         const host=this.resolve(id);
         if (kind==='log') {
+            const limits=this.logLimits();args={...args,lines:Math.min(Number(args.lines)||limits.lines,limits.lines),maxBytes:Math.min(Number(args.maxBytes)||limits.maxBytes,limits.maxBytes)};
             const path=validateTaskPath(args.path);
-            if (!this.grants[id]?.includes(path)) {
+            if (!allowOnce && !this.grants[id]?.includes(path)) {
                 this.logs.set(id,new Set([...(this.logs.get(id)||[]),path])); this.events.emit('change');
-                return { needsAuthorization:true,path,message:'Ask the user to authorize this task log using the sidebar. Do not claim to have read it.' };
+                return { needsAuthorization:true,path,message:'This exact task log needs user authorization. Do not claim to have read it.' };
             }
         }
         if (kind==='process' || (kind==='resources' && args.pid!==undefined)) {

@@ -39,6 +39,7 @@ async function main() {
         req.on('end', () => {
             requests.push({ path: req.url, headers: req.headers, body: JSON.parse(text) });
             res.setHeader('Content-Type', 'application/json');
+            if(req.url.includes('reset')) { req.socket.destroy(); return; }
             if (req.url.includes('fail')) {
                 res.statusCode = 401;
                 res.end(JSON.stringify({ error: { message: 'secret-dummy-must-not-leak' } }));
@@ -79,12 +80,15 @@ async function main() {
         assert.strictEqual(requests[1].body.messages[0].role, 'user');
         assert.ok(typeof requests[1].body.system === 'string');
         for(const protocol of ['openai','anthropic']) {
-            const deltas=[];
+            const deltas=[],activity=[];
             const turn=await aiTurn({...options,protocol,baseUrl:baseUrl+'/stream'},[
                 {role:'user',content:'查任务'},
                 {role:'assistant',content:'',toolCalls:[{id:'earlier',name:'get_fleet_status',arguments:{}}]},
                 {role:'tool',content:'fleet result',toolCallId:'earlier'}
-            ],'current context',[{name:'inspect_task',description:'Inspect a task',parameters:{type:'object',properties:{}}}],undefined,delta=>deltas.push(delta));
+            ],'current context',[{name:'inspect_task',description:'Inspect a task',parameters:{type:'object',properties:{}}}],undefined,delta=>deltas.push(delta),event=>activity.push(event));
+            assert.ok(activity.some(event=>event.phase==='connecting'));
+            assert.ok(activity.some(event=>event.phase==='waiting'));
+            assert.ok(activity.some(event=>event.phase==='tool'));
             assert.deepStrictEqual(turn.toolCalls,[{id:'t1',name:'inspect_task',arguments:{server:'host-a',pid:'42'}}]);
             if(protocol==='openai') assert.strictEqual(deltas.join(''),'**GPU** ready');
             const body=requests.at(-1).body;
@@ -93,6 +97,7 @@ async function main() {
             else assert.strictEqual(body.messages.at(-1).tool_call_id,'earlier');
         }
         await assert.rejects(askAi({ ...options, baseUrl: baseUrl + '/fail' }, [{ role: 'user', content: 'Help' }], ''), error => /401/.test(error.message) && !/secret-dummy/.test(error.message));
+        await assert.rejects(askAi({...options,baseUrl:baseUrl+'/reset'},[{role:'user',content:'Help'}],''),error=>error.code==='ECONNRESET'&&/waiting/.test(error.message)&&!error.message.includes(options.apiKey));
         const controller = new AbortController();
         const pending = askAi({ ...options, baseUrl: baseUrl + '/slow' }, [{ role: 'user', content: 'Help' }], '', controller.signal);
         setTimeout(() => controller.abort(), 20);

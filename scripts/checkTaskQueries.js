@@ -12,6 +12,14 @@ try {
     const result = JSON.parse(cp.execFileSync('sh', ['-c', taskCommand('log', { path: log })], { encoding: 'utf8' }));
     assert.ok(result.text.includes('step 200/1000'));
     assert.ok(!result.text.startsWith('old\n'.repeat(210)), 'Only a bounded log tail may be read.');
+    const largerLog=path.join(root,'large.log');
+    fs.writeFileSync(largerLog,Array.from({length:600},(_,i)=>'line-'+i+' '+ 'x'.repeat(400)).join('\n'));
+    const larger=JSON.parse(cp.execFileSync('sh',['-c',taskCommand('log',{path:largerLog,lines:500,maxBytes:256*1024})],{encoding:'utf8',maxBuffer:1024*1024}));
+    assert.strictEqual(larger.text.split('\n').length,500,'Configured log reads must exceed the old 200-line/64KiB limits.');
+    assert.ok(larger.text.startsWith('line-100 '));assert.ok(Buffer.byteLength(larger.text)>65536);
+    const smaller=JSON.parse(cp.execFileSync('sh',['-c',taskCommand('log',{path:largerLog,lines:500,maxBytes:16384})],{encoding:'utf8'}));
+    assert.ok(Buffer.byteLength(smaller.text)<=16384);assert.strictEqual(smaller.truncated,true);
+    for(const limits of [{lines:0},{lines:1.5},{lines:10001},{maxBytes:2097153}])assert.throws(()=>taskCommand('log',{path:largerLog,...limits}),/log read limit/);
     const progress = parseProgress(result.text);
     assert.strictEqual(progress.current, 200);
     assert.strictEqual(progress.total, 1000);

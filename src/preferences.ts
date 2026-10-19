@@ -46,7 +46,10 @@ export const preferenceFields: PreferenceField[] = [
     { key: 'ai.protocol', group: 'ai', label: ['API protocol', 'API 协议'], type: 'enum', options: ['openai', 'anthropic'], default: 'openai' },
     { key: 'ai.baseUrl', group: 'ai', label: ['API base URL or full endpoint', 'API 基础地址或完整接口地址'], type: 'string', default: 'https://api.openai.com/v1' },
     { key: 'ai.model', group: 'ai', label: ['Model ID (from your provider)', '模型 ID（由 API 服务商提供）'], type: 'string', default: '' },
-    { key: 'ai.timeoutSeconds', group: 'ai', label: ['Response timeout (seconds)', '响应超时（秒）'], type: 'number', min: 5, max: 300, default: 60 }
+    { key: 'ai.maxToolCalls', group: 'ai', label: ['Tool calls per turn (0 = unlimited)', '每轮工具调用次数（0 = 不限）'], type: 'number', min: 0, max: 10000, default: 0 },
+    { key: 'ai.logTailLines', group: 'ai', label: ['Task log tail (lines)', '任务日志末尾行数'], type: 'number', min: 20, max: 10000, default: 500 },
+    { key: 'ai.logTailKiB', group: 'ai', label: ['Task log read limit (KiB)', '单次日志读取上限（KiB）'], type: 'number', min: 16, max: 2048, default: 256 },
+    { key: 'ai.timeoutSeconds', group: 'ai', label: ['Response timeout (seconds)', '响应超时（秒）'], type: 'number', min: 5, max: 900, default: 120 }
 ];
 
 export function validatePreferenceChanges(input: unknown): Record<string, unknown> {
@@ -65,6 +68,7 @@ export function validatePreferenceChanges(input: unknown): Record<string, unknow
         if (field.type === 'events') valid = Array.isArray(value) && value.every(event => field.options?.includes(event));
         if (field.type === 'gpus') valid = Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.entries(value).length <= 500 &&
             Object.entries(value).every(([host, ids]) => !['__proto__','constructor','prototype'].includes(host) && !host.startsWith('-') && /^[A-Za-z0-9_.:@-]+$/.test(host) && Array.isArray(ids) && ids.length <= 128 && ids.every(id => typeof id === 'string' && /^(?:\d{1,4}|GPU-[\w-]+)$/.test(id)));
+        if (['ai.maxToolCalls','ai.logTailLines','ai.logTailKiB'].includes(key) && !Number.isInteger(value)) valid=false;
         if (!valid) throw new Error(`Invalid setting: ${key}`);
         if (key === 'ai.baseUrl') {
             try {

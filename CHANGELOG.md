@@ -2,6 +2,15 @@
 
 All notable changes to GPU Fleet Viewer are documented here.
 
+## 1.4.1 - 2026-10-19
+
+- Show actual AI connection, waiting, response and tool stages inline with elapsed time and expandable evidence.
+- Replace log authorization dialogs with exact-file inline allow-once, remember and decline actions that automatically resume the pending query.
+- Preserve safe network error codes, request phases and redacted HTTP diagnostics; retain pending work for retry, including cancellation during authorization.
+- Default to unlimited tool calls, with an optional user budget and continuation; expand question, context, response, timeout and configurable log-read capacities.
+- Compact old tool groups without breaking protocol pairs and bound displayed activity details so long investigations can keep running.
+- Move GPU/task details into a right sidebar or narrow-window drawer, retaining selection and scroll through refreshes, with Escape and focus restoration.
+
 ## 1.4.0 - 2026-10-19
 
 - Kept the dashboard and rebuilt AI as a compact chat dialog with a task/context sidebar, safe Markdown tables/code, streaming, cancellation, keyboard input and query evidence.

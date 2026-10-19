@@ -133,7 +133,7 @@ export function getPreferencesScript(): string {
                             input.type = 'checkbox';
                             input.checked = value;
                         } else if (field.type === 'number') {
-                            input.type = 'number'; input.min = field.min; input.max = field.max; input.step = 'any'; input.required = true;
+                            input.type = 'number'; input.min = field.min; input.max = field.max; input.step = ['ai.maxToolCalls','ai.logTailLines','ai.logTailKiB'].includes(field.key) ? '1' : 'any'; input.required = true;
                         } else if (field.type === 'hosts') {
                             input.rows = 3;
                         } else {

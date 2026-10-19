@@ -109,7 +109,10 @@ Settings are saved explicitly. **Servers → Visible GPUs per server** lets you 
 | `gpu-fleet-viewer.ai.protocol` | `openai` | OpenAI-compatible Chat Completions or Anthropic Messages |
 | `gpu-fleet-viewer.ai.baseUrl` | `https://api.openai.com/v1` | Custom API base URL or full endpoint |
 | `gpu-fleet-viewer.ai.model` | empty | Model ID provided by your API service |
-| `gpu-fleet-viewer.ai.timeoutSeconds` | `60` | AI response timeout |
+| `gpu-fleet-viewer.ai.timeoutSeconds` | `120` | AI response timeout, up to 900 seconds |
+| `gpu-fleet-viewer.ai.maxToolCalls` | `0` | Tool calls per turn; 0 = unlimited. A positive budget pauses with a Continue action |
+| `gpu-fleet-viewer.ai.logTailLines` | `500` | Task log tail lines per read, up to 10,000 |
+| `gpu-fleet-viewer.ai.logTailKiB` | `256` | Task log bytes per read, up to 2,048 KiB |
 
 Target lists, ignored hosts, SSH config path, and warning thresholds are also configurable. Settings from the earlier `gpu-server-viewer` namespace are migrated automatically on first activation.
 
@@ -117,11 +120,13 @@ Target lists, ignored hosts, SSH config path, and warning thresholds are also co
 
 1. Open dashboard **Settings → AI**, choose the protocol, enter your provider's API URL and model ID, and save.
 2. Select **Set / replace key**. VS Code prompts for the key using a password field and saves it in SecretStorage for that protocol and endpoint. It is never stored in `settings.json` or passed to the Webview.
-3. Open **AI assistant**, or select **Ask AI** in a GPU's task inspector. The dashboard remains behind a compact chat window. The sidebar shows the conversation scope, data time, authorized logs, query evidence, and reminders.
+3. Open **AI assistant**, or select **Ask AI** in a GPU's task inspector. The dashboard remains behind a compact chat window. The sidebar shows the conversation scope, data time, authorized logs, and reminders. Clicking a GPU opens its task inspector in a separate right sidebar, with a drawer on narrow windows; close it with its close button or Escape.
 
-The current visible fleet summary is included automatically when you send a question. The assistant can combine bounded local SSH queries to trace workers to their launcher, inspect Slurm queue/accounting, compare resources and read explicitly authorized task logs. Each tool operation appears in the sidebar. No SSH private keys or API keys are sent to the model. Full commands and authorized log excerpts may contain private experimental data; only authorize files you permit your configured provider to receive. Common credential fields are masked, but masking is not comprehensive data anonymization.
+The current visible fleet summary is included automatically when you send a question. The assistant can combine bounded local SSH queries to trace workers to their launcher, inspect Slurm queue/accounting, compare resources and read explicitly authorized task logs. Connection, waiting, response and tool stages appear directly in the conversation with elapsed time and expandable evidence. These are actual operations, not model reasoning. No SSH private keys or API keys are sent to the model. Full commands and authorized log excerpts may contain private experimental data; only authorize files you permit your configured provider to receive. Common credential fields are masked, but masking is not comprehensive data anonymization.
 
-For example: **“What is running on GPU 6 and 7?” → “Check the parent process and its progress” → “Notify me when this task ends.”** If a log needs authorization, select its exact path in the sidebar, then send a follow-up. You can also authorize a known absolute path for the selected server. Revoke permissions from the same sidebar.
+For example: **“What is running on GPU 6 and 7?” → “Check the parent process and its progress” → “Notify me when this task ends.”** If a log needs authorization, an inline card shows its exact server/path, read size and receiving API. Choose **Allow once and continue**, **Always allow this file**, or **Decline**; the pending operation resumes automatically. You can also authorize a known absolute path for the selected server and revoke saved permissions from the sidebar.
+
+Tool-call count is unlimited by default. You can stop a turn at any time or set a positive budget in **Settings → AI**. A paused or failed investigation can continue from pending work without replaying completed actions. Long investigations compact older tool groups into bounded factual excerpts and retain recent evidence; missing details can be queried again. The view retains the latest 80 completed activity records with bounded detail excerpts, independently of how many tools execute. DNS, connection-reset, TLS, timeout and HTTP failures include available error codes/stages; these diagnostics distinguish failure types but do not prove which network party caused them.
 
 Completion estimates need logged progress and an observed speed; they describe the current phase and may exclude validation/checkpoint saving. Slurm time limits are shown as scheduling constraints. Utilization or runtime alone does not provide a reliable ETA. Missing permissions, container visibility, unavailable tools and unknown outcomes are reported rather than inferred as success.
 
@@ -137,7 +142,7 @@ Reminders persist locally and run while **desktop VS Code is running and the mac
 
 ## Security and privacy
 
-GPU Fleet Viewer invokes your system `ssh` client with argument-safe execution, key-only batch mode, and a configurable timeout. A custom SSH config is passed to the SSH client as well as used for host discovery. Hosts and GPU identifiers received from the Webview are validated again in the extension host. It reads your SSH config but never reads or stores private-key contents. Monitoring data stays between VS Code and your servers unless you explicitly attach a snapshot to an AI question. There is no telemetry service, persistent metric history, or job-control endpoint.
+GPU Fleet Viewer invokes your system `ssh` client with argument-safe execution, key-only batch mode, and a configurable timeout. A custom SSH config is passed to the SSH client as well as used for host discovery. Hosts and GPU identifiers received from the Webview are validated again in the extension host. It reads your SSH config but never reads or stores private-key contents. Monitoring data stays between VS Code and your servers until you send an AI question, which includes the visible fleet context and may request relevant task evidence. There is no telemetry service, persistent metric history, or job-control endpoint.
 
 Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 

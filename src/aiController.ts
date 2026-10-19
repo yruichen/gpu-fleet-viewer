@@ -1,5 +1,6 @@
+import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
-import { AiProtocol, aiEndpoint, aiSecretKey, aiTurn, ChatMessage, buildFleetContext, AiTool } from './aiClient';
+import { AiProtocol, aiEndpoint, aiSecretKey, aiTurn, ChatMessage, ToolCall, buildFleetContext, AiTool } from './aiClient';
 import { ServerStatus } from './fleetModel';
 import { TaskService, serverId, visibleFleet } from './taskService';
 import { renderMarkdown } from './markdown';
@@ -12,14 +13,16 @@ const TOOLS:AiTool[]=[
     tool('inspect_task','Trace a GPU PID to parent/launcher, working directory, related children and task log candidates. Use this to identify multiprocessing workers.',{server:string,pid:string},['server','pid']),
     tool('inspect_job','Read Slurm job details/accounting, or the current SSH user queue if job is omitted. EndTime while running is not a training ETA.',{server:string,job:string},['server']),
     tool('inspect_host','Read two short GPU samples, host memory/load, root filesystem space, driver and GPU topology for bottleneck/resource questions.',{server:string,pid:string},['server']),
-    tool('read_task_log','Read up to 200 lines/64KiB of an explicitly authorized task log. Unapproved paths require user authorization in sidebar; never bypass it.',{server:string,path:string},['server','path']),
+    tool('read_task_log','Read the configured bounded tail of an explicitly authorized task log. Unapproved paths require user authorization in the conversation; never bypass it.',{server:string,path:string},['server','path']),
     tool('manage_reminders','Create/list/cancel a reminder only as requested by the user. available requires GPU UUIDs. taskEnded requires a verified launcher PID or Slurm job. Time fields are ISO strings with timezone; default deadline 24h.',{
         action:{type:'string',enum:['create','list','cancel','update']},id:string,server:string,mode:{type:'string',enum:['available','taskEnded','at']},gpuIds:{type:'array',items:string},match:{type:'string',enum:['all','any']},pid:string,job:string,at:string,notBefore:string,expiresAt:string
     },['action'])
 ];
 export class AiController implements vscode.Disposable {
     private history:ChatMessage[]=[];
+    private approval?:{id:string;server:string;path:string;resolve:(decision:'once'|'remember'|'deny')=>void};
     private active?:AbortController;
+    private continuation?:{conversation:ChatMessage[];pending:ToolCall[];context:string};
     private disposed=false;
     private tasks:TaskService;
     private listener:vscode.Disposable;
@@ -31,12 +34,12 @@ export class AiController implements vscode.Disposable {
     }
     private configuration() {
         const config=vscode.workspace.getConfiguration('gpu-fleet-viewer');
-        return {protocol:config.get<AiProtocol>('ai.protocol','openai'),baseUrl:config.get<string>('ai.baseUrl','https://api.openai.com/v1'),model:config.get<string>('ai.model',''),timeoutSeconds:config.get<number>('ai.timeoutSeconds',60)};
+        return {protocol:config.get<AiProtocol>('ai.protocol','openai'),baseUrl:config.get<string>('ai.baseUrl','https://api.openai.com/v1'),model:config.get<string>('ai.model',''),timeoutSeconds:config.get<number>('ai.timeoutSeconds',120)};
     }
     async isConfigured():Promise<boolean> {
         try {const o=this.configuration();return Boolean(await this.context.secrets.get(aiSecretKey(o.protocol,o.baseUrl)));} catch {return false;}
     }
-    reset():void {this.active?.abort();this.active=undefined;this.history=[];if(!this.disposed) void this.webview.postMessage({type:'aiReset'});}
+    reset():void {this.active?.abort();this.active=undefined;this.history=[];this.continuation=undefined;if(!this.disposed) void this.webview.postMessage({type:'aiReset'});}
     dispose():void {this.disposed=true;this.reset();this.listener.dispose();}
     private async publishState() {
         if(this.disposed) return;
@@ -45,6 +48,11 @@ export class AiController implements vscode.Disposable {
     }
     async handle(payload:Record<string,unknown>):Promise<boolean> {
         switch(payload.command) {
+            case 'resolveAiApproval': {
+                const pending=this.approval;
+                if(pending&&pending.id===payload.id&&['once','remember','deny'].includes(String(payload.decision)))pending.resolve(payload.decision as 'once'|'remember'|'deny');
+                return true;
+            }
             case 'setAiKey':
             case 'deleteAiKey': {
                 try {
@@ -84,10 +92,7 @@ export class AiController implements vscode.Disposable {
                     let path=payload.path;
                     if(typeof path!=='string') path=await vscode.window.showInputBox({title:'Task log path / 任务日志路径',prompt:'Absolute remote path. Its tail will be sent to your configured AI service when requested. / 读取后会发送到你配置的 API。',ignoreFocusOut:true});
                     if(typeof path!=='string') return true;
-                    if(payload.revoke!==true) {
-                        const accepted=await vscode.window.showWarningMessage(`Authorize task log / 授权任务日志: ${path}\nThe bounded log tail may be sent to ${aiEndpoint(this.configuration().protocol,this.configuration().baseUrl).host}.`,{modal:true},'Authorize / 授权');
-                        if(!accepted) return true;
-                    }
+                    if(payload.revoke!==true&&this.approval?.server===payload.server&&this.approval.path===path){this.approval.resolve('remember');return true;}
                     await this.tasks.authorize(payload.server,path,payload.revoke!==true);
                 } catch(error) { await this.webview.postMessage({type:'aiNotice',error:redactTaskText((error as Error).message)}); }
                 return true;
@@ -121,11 +126,12 @@ export class AiController implements vscode.Disposable {
                 if(typeof payload.text==='string'&&payload.text.length<=128*1024) await vscode.env.clipboard.writeText(payload.text); return true;
             case 'clearAi': this.reset();return true;
             case 'cancelAi': this.active?.abort();return true;
+            case 'continueAi': await this.ask({...payload,continuing:true});return true;
             case 'askAi': await this.ask(payload);return true;
             default:return false;
         }
     }
-    private async execute(name:string,args:Record<string,unknown>,signal:AbortSignal):Promise<unknown> {
+    private async execute(name:string,args:Record<string,unknown>,signal:AbortSignal,operationId?:string):Promise<unknown> {
         if(signal.aborted) throw new Error('Request cancelled.');
         const schema=TOOLS.find(t=>t.name===name);
         if(!schema) throw new Error('This tool is not allowed.');
@@ -146,65 +152,133 @@ export class AiController implements vscode.Disposable {
         if(name==='inspect_job') return this.tasks.query(args.server,'job',args.job===undefined?{}:{job:args.job},signal);
         if(name==='inspect_host') return this.tasks.query(args.server,'resources',args.pid===undefined?{}:{pid:args.pid},signal);
         if(name==='read_task_log') {
-            const result=await this.tasks.query(args.server,'log',{path:args.path},signal);
+            const readArgs={path:args.path,...this.tasks.logLimits()};
+            let result=await this.tasks.query(args.server,'log',readArgs,signal);
+            if(result.needsAuthorization){
+                const decision=await this.requestLogApproval(args.server,result.path,signal,operationId);
+                if(decision==='deny')return {denied:true,message:'User declined this log. Use other available evidence and do not ask again unless the user requests it.'};
+                if(decision==='remember')await this.tasks.authorize(args.server,result.path,true);
+                if(signal.aborted)throw new Error('Request cancelled.');
+                result=await this.tasks.query(args.server,'log',readArgs,signal,decision==='once');
+            }
             if(!result.needsAuthorization)await this.webview.postMessage({type:'taskProgress',host:this.tasks.resolve(args.server),path:args.path,progress:result.progress,modifiedAt:result.modifiedAt,collectedAt:result.collectedAt});
             return result;
         }
         throw new Error('Unsupported tool.');
     }
-    private async ask(payload:Record<string,unknown>) {
-        if(this.active||this.disposed) return;
-        const active=new AbortController();this.active=active;
-        const post=async(message:Record<string,unknown>)=>{if(!this.disposed&&this.active===active) await this.webview.postMessage(message);};
-        try {
-            if(typeof payload.question!=='string'||!payload.question.trim()||payload.question.length>8000) throw new Error('Enter a question of at most 8000 characters.');
-            const options=this.configuration();const apiKey=await this.context.secrets.get(aiSecretKey(options.protocol,options.baseUrl))||'';
-            const starts=this.history.map((m,i)=>m.role==='user'?i:-1).filter(i=>i>=0);
-            const conversation=[...this.history.slice(starts[Math.max(0,starts.length-4)]||0),{role:'user' as const,content:payload.question.trim()}];
-            const masks=vscode.workspace.getConfiguration('gpu-fleet-viewer').get<Record<string,string[]>>('visibleGpus',{});
-            const context=buildFleetContext(visibleFleet(this.getData(),masks),false)+'\nSelected task: '+JSON.stringify(this.scope||null)+'\nActive reminders: '+JSON.stringify(this.tasks.state().reminders.filter(w=>w.status==='active'));
-            let count=0,bytes=0,combined='',tools=TOOLS,stream=true;
-            for(let round=0;round<13;round++) {
-                if(active.signal.aborted) throw new Error('Request cancelled.');
-                let part='';let last=0;
-                let result;
-                try {
-                    result=await aiTurn({...options,apiKey,stream},conversation,context+(tools.length?'':'\nTool execution is unavailable for this provider. State this clearly; use cached facts and general GPU guidance only. Do not claim SSH queries or reminder changes.'),tools,active.signal,delta=>{
-                        part+=delta;
-                        if(Date.now()-last>70) {last=Date.now();void post({type:'aiDelta',answer:combined+part,html:renderMarkdown(combined+part)});}
-                    });
-                } catch(error) {
-                    if(!count&&tools.length&&[400,404,422].includes((error as any).status)) {
-                        tools=[];stream=false;await post({type:'aiStep',name:'compatibility',text:'Provider rejected tools/streaming parameters. Retrying plain GPU chat; tool execution is unavailable. / 服务拒绝工具参数，尝试普通对话。'});continue;
-                    }
-                    throw error;
-                }
-                combined+=result.text;
-                await post({type:'aiDelta',answer:combined,html:renderMarkdown(combined)});
-                conversation.push({role:'assistant',content:result.text,toolCalls:result.toolCalls});
-                if(!result.toolCalls.length) {
-                    this.history=conversation;
-                    await post({type:'aiResult',answer:combined,html:renderMarkdown(combined)});return;
-                }
-                combined+='\n\n';
-                if(count+result.toolCalls.length>12) throw new Error('Tool limit reached; ask a more focused follow-up.');
-                for(const call of result.toolCalls) {
-                    if(active.signal.aborted) throw new Error('Request cancelled.');
-                    count++;
-                    await post({type:'aiStep',name:call.name,args:call.arguments,state:'running'});
-                    let value:unknown;
-                    try {value=await this.execute(call.name,call.arguments,active.signal);} catch(error) {value={error:redactTaskText((error as Error).message).slice(0,1000)};}
-                    if(active.signal.aborted) throw new Error('Request cancelled.');
-                    let output=JSON.stringify(value);const remaining=128*1024-bytes;
-                    if(remaining<=0) throw new Error('Tool evidence limit reached. Continue with a focused question.');
-                    if(Buffer.byteLength(output)>Math.min(remaining,70*1024)) output=Buffer.from(output).subarray(0,Math.min(remaining,70*1024)).toString('utf8')+'\n[Evidence truncated]';
-                    bytes+=Buffer.byteLength(output);
-                    conversation.push({role:'tool',content:output,toolCallId:call.id});
-                    await post({type:'aiStep',name:call.name,state:(value as any)?.error?'error':'done',result:output});
-                }
+    private async requestLogApproval(server:string,path:string,signal:AbortSignal,operationId?:string):Promise<'once'|'remember'|'deny'> {
+        const id=randomUUID();
+        if(signal.aborted)throw new Error('Request cancelled.');
+        return new Promise((resolve,reject)=>{
+            const finish=(decision?:'once'|'remember'|'deny')=>{
+                if(this.approval?.id!==id)return;
+                this.approval=undefined;signal.removeEventListener('abort',cancel);
+                if(!this.disposed)void this.webview.postMessage({type:'aiApprovalResult',id,decision:decision||'cancelled'});
+                if(decision&&decision!=='deny'&&!this.disposed)void this.webview.postMessage({type:'aiStep',id:operationId,name:'read_task_log',state:'running',phase:'executing'});
+                if(decision)resolve(decision);else reject(new Error('Request cancelled.'));
+            };
+            const cancel=()=>finish();
+            this.approval={id,server,path,resolve:decision=>finish(decision)};
+            signal.addEventListener('abort',cancel,{once:true});
+            void this.webview.postMessage({type:'aiApproval',id,operationId,server,label:this.tasks.hosts().find(h=>h.id===server)?.label,path,
+                endpoint:aiEndpoint(this.configuration().protocol,this.configuration().baseUrl).host,maxLines:this.tasks.logLimits().lines,maxBytes:this.tasks.logLimits().maxBytes});
+        });
+    }
+    private compactEvidence(conversation:ChatMessage[]):void {
+        const prefix='[Earlier conversation records compacted; excerpts only. Re-query for missing or current facts.]\n';
+        let bytes=conversation.reduce((n,m)=>n+Buffer.byteLength(JSON.stringify(m))+1,2);
+        if(bytes<=1024*1024)return;
+        let excerpts='';
+        const previous=conversation.findIndex(m=>m.role==='assistant'&&m.content.startsWith(prefix));
+        if(previous>=0){const [m]=conversation.splice(previous,1);excerpts=m.content.slice(prefix.length);bytes-=Buffer.byteLength(JSON.stringify(m))+1;}
+        const questions=conversation.filter(m=>m.role==='user'),latestQuestion=questions[questions.length-1];
+        while(bytes>768*1024){
+            let index=conversation.findIndex(m=>m.role==='assistant'&&m.toolCalls?.length);
+            if(index<0)index=conversation.findIndex(m=>m!==latestQuestion);
+            if(index<0)break;
+            let end=index+1;
+            // Remove complete tool groups so neither protocol receives orphaned results.
+            if(conversation[index].toolCalls?.length)while(conversation[end]?.role==='tool')end++;
+            for(const m of conversation.splice(index,end-index)){
+                bytes-=Buffer.byteLength(JSON.stringify(m))+1;
+                const text=(m.toolCalls?.length?JSON.stringify(m.toolCalls).slice(0,2048)+'\n':'')+m.content;
+                excerpts=(excerpts+'\n'+m.role+': '+(text.length>6144?text.slice(0,1024)+'\n…\n'+text.slice(-5120):text)).slice(-24000);
             }
-            throw new Error('Tool limit reached.');
-        } catch(error) {await post({type:'aiResult',error:redactTaskText((error as Error).message)});}
-        finally {if(this.active===active)this.active=undefined;void this.publishState();}
+        }
+        conversation.splice(Math.max(0,conversation.findIndex(m=>m.role==='user')+1),0,{role:'assistant',content:prefix+excerpts});
+    }
+    private async ask(payload:Record<string,unknown>) {
+        if(this.active||this.disposed)return;
+        const active=new AbortController();this.active=active;
+        const post=async(message:Record<string,unknown>)=>{if(!this.disposed&&this.active===active)await this.webview.postMessage(message);};
+        let conversation:ChatMessage[]=[],pending:ToolCall[]=[],context='',count=0,combined='';
+        try{
+            const continuing=payload.continuing===true;
+            if(continuing&&!this.continuation)throw new Error('No pending investigation to continue.');
+            if(!continuing&&(typeof payload.question!=='string'||!payload.question.trim()||payload.question.length>32000))throw new Error('Enter a question of at most 32000 characters.');
+            const preparedAt=Date.now();await post({type:'aiActivity',id:'prepare',phase:'preparing',state:'running',startedAt:preparedAt});
+            const options=this.configuration();const apiKey=await this.context.secrets.get(aiSecretKey(options.protocol,options.baseUrl))||'';
+            const c=vscode.workspace.getConfiguration('gpu-fleet-viewer');
+            const limit=Math.max(0,Math.min(10000,Math.floor(c.get<number>('ai.maxToolCalls',0))));
+            if(active.signal.aborted)throw new Error('Request cancelled.');
+            if(continuing){const saved=this.continuation;if(!saved)throw new Error('No pending investigation to continue.');conversation=saved.conversation;pending=saved.pending;context=saved.context;}
+            else{
+                if(this.continuation){
+                    this.history=[...this.continuation.conversation,...this.continuation.pending.map(call=>({role:'tool' as const,toolCallId:call.id,content:'Not executed: user started a new question.'}))];
+                }
+                const starts=this.history.map((m,i)=>m.role==='user'?i:-1).filter(i=>i>=0);
+                conversation=[...this.history.slice(starts[Math.max(0,starts.length-8)]||0),{role:'user',content:(payload.question as string).trim()}];
+                const masks=c.get<Record<string,string[]>>('visibleGpus',{});
+                context=buildFleetContext(visibleFleet(this.getData(),masks),false)+'\nSelected task: '+JSON.stringify(this.scope||null)+'\nActive reminders: '+JSON.stringify(this.tasks.state().reminders.filter(w=>w.status==='active'));
+            }
+            this.continuation=undefined;
+            await post({type:'aiActivity',id:'prepare',phase:'preparing',state:'done',startedAt:preparedAt});
+            let tools=TOOLS,stream=true,round=0;
+            while(!active.signal.aborted){
+                if(!pending.length){
+                    this.compactEvidence(conversation);
+                    let part='',last=0;const modelId='model-'+round++,startedAt=Date.now();
+                    let result;
+                    try{
+                        result=await aiTurn({...options,apiKey,stream},conversation,context+(tools.length?'':'\nTool execution is unavailable in compatibility mode. Use cached facts/general GPU guidance and state this clearly.'),tools,active.signal,delta=>{
+                            part+=delta;if(Date.now()-last>70){last=Date.now();void post({type:'aiDelta',answer:combined+part,html:renderMarkdown(combined+part)});}
+                        },event=>{void post({type:'aiActivity',id:modelId,...event,state:'running',startedAt,endpoint:aiEndpoint(options.protocol,options.baseUrl).host,model:options.model});});
+                        await post({type:'aiActivity',id:modelId,state:'done',startedAt});
+                    }catch(error){
+                        await post({type:'aiActivity',id:modelId,state:active.signal.aborted?'cancelled':'error',startedAt,error:(error as Error).message});
+                        if(!count&&tools.length&&[400,404,422].includes((error as any).status)){
+                            tools=[];stream=false;await post({type:'aiStep',id:'compatibility',name:'compatibility',state:'done',text:'API rejected this request. Retrying basic chat without tools or streaming. / API 未接受本轮请求，尝试不带工具和流式的兼容模式。'});continue;
+                        }
+                        throw error;
+                    }
+                    combined+=result.text;
+                    await post({type:'aiDelta',answer:combined,html:renderMarkdown(combined)});
+                    conversation.push({role:'assistant',content:result.text,toolCalls:result.toolCalls});
+                    if(!result.toolCalls.length){this.history=conversation;await post({type:'aiResult',answer:combined,html:renderMarkdown(combined)});return;}
+                    if(!tools.length)throw new Error('The provider requested unavailable tools in basic chat mode.');
+                    if(combined)combined+='\n\n';pending=result.toolCalls.slice();
+                }
+                if(limit&&count>=limit){
+                    this.continuation={conversation,pending,context};
+                    await post({type:'aiResult',answer:combined,html:renderMarkdown(combined),paused:true,canContinue:true,completed:count,remaining:pending.length});return;
+                }
+                const call=pending[0];count++;
+                await post({type:'aiStep',id:call.id,name:call.name,args:call.arguments,state:'running',startedAt:Date.now()});
+                let value:unknown;
+                try{value=await this.execute(call.name,call.arguments,active.signal,call.id);}catch(error){
+                    if(active.signal.aborted)throw error;
+                    value={error:redactTaskText((error as Error).message).slice(0,2000)};
+                }
+                let output=JSON.stringify(value);
+                if(Buffer.byteLength(output)>1024*1024)output=JSON.stringify({truncated:true,originalBytes:Buffer.byteLength(output),excerpt:output.slice(0,128*1024)+'\n…\n'+output.slice(-512*1024)});
+                conversation.push({role:'tool',content:output,toolCallId:call.id});pending.shift();
+                await post({type:'aiStep',id:call.id,name:call.name,state:(value as any)?.error?'error':(value as any)?.denied?'denied':'done',result:output});
+                if(active.signal.aborted)throw new Error('Request cancelled.');
+            }
+            throw new Error('Request cancelled.');
+        }catch(error){
+            if(this.active===active&&!this.disposed&&conversation.length)this.continuation={conversation,pending,context};
+            await post({type:'aiResult',error:redactTaskText((error as Error).message),code:(error as any).code,phase:(error as any).phase,status:(error as any).status,canContinue:Boolean(this.continuation)});
+        }finally{if(this.active===active)this.active=undefined;void this.publishState();}
     }
 }

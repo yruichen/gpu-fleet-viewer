@@ -70,11 +70,12 @@ elif kind=='log':
     try:
         info=os.fstat(fd)
         if not stat.S_ISREG(info.st_mode): raise ValueError('Only regular task files are allowed')
-        os.lseek(fd,max(0,info.st_size-65536),os.SEEK_SET)
-        raw=os.read(fd,65536).decode('utf-8','replace')
+        limit=args.get('maxBytes',65536); lines_limit=args.get('lines',200)
+        os.lseek(fd,max(0,info.st_size-limit),os.SEEK_SET)
+        raw=os.read(fd,limit).decode('utf-8','replace')
         if '\x00' in raw: raise ValueError('Binary files are not task logs')
         lines=raw.splitlines()
-        print(json.dumps(dict(path=p,text='\n'.join(lines[-200:]),modifiedAt=info.st_mtime,size=info.st_size,truncated=info.st_size>65536 or len(lines)>200)))
+        print(json.dumps(dict(path=p,text='\n'.join(lines[-lines_limit:]),modifiedAt=info.st_mtime,size=info.st_size,truncated=info.st_size>limit or len(lines)>lines_limit)))
     finally: os.close(fd)
 elif kind=='job':
     j=args.get('job')
@@ -96,7 +97,7 @@ elif kind=='resources':
 `;
 
 export function taskCommand(kind: TaskQuery, args: Record<string, unknown>): string {
-    const safe: Record<string, string> = {};
+    const safe: Record<string, string | number> = {};
     if (kind === 'process') {
         if (typeof args.pid !== 'string' || !/^[1-9]\d{0,9}$/.test(args.pid)) throw new Error('Invalid PID.');
         safe.pid = args.pid;
@@ -105,7 +106,12 @@ export function taskCommand(kind: TaskQuery, args: Record<string, unknown>): str
             if (typeof args.job !== 'string' || !/^\d{1,12}(?:_\d{1,8})?$/.test(args.job)) throw new Error('Invalid job ID.');
             safe.job = args.job;
         }
-    } else if (kind === 'log') safe.path = validateTaskPath(args.path);
+    } else if (kind === 'log') {
+        safe.path=validateTaskPath(args.path);
+        for(const [key,max] of [['lines',10000],['maxBytes',2097152]] as const){
+            if(args[key]!==undefined){if(typeof args[key]!=='number'||!Number.isInteger(args[key])||Number(args[key])<1||Number(args[key])>max)throw new Error('Invalid log read limit.');safe[key]=args[key] as number;}
+        }
+    }
     else if (kind === 'resources') {
         if(args.pid !== undefined) {
             if(typeof args.pid !== 'string' || !/^[1-9]\d{0,9}$/.test(args.pid)) throw new Error('Invalid PID.');

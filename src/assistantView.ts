@@ -5,14 +5,13 @@ export function getAssistantHtml(): string {
             <div id="assistant-messages" class="assistant-messages" role="log" aria-label="Conversation"></div>
             <form id="assistant-form" class="assistant-form">
                 <label for="assistant-prompt" id="assistant-prompt-label" class="subtle"></label>
-                <textarea id="assistant-prompt" rows="3" maxlength="8000" required></textarea>
+                <textarea id="assistant-prompt" rows="3" maxlength="32000" required></textarea>
                 <footer class="assistant-footer"><span id="assistant-status" role="status"></span><div class="dialog-actions"><button id="assistant-cancel" type="button" class="secondary-button" hidden></button><button id="assistant-send" type="submit"></button></div></footer>
             </form>
         </div><aside class="assistant-sidebar" aria-label="Task context and reminders">
             <details class="assistant-context-section" open><summary id="assistant-context-title"></summary><label for="assistant-server" class="subtle" id="assistant-server-label"></label><select id="assistant-server"></select><div id="assistant-scope" class="subtle"></div><p id="assistant-privacy" class="subtle"></p><div id="assistant-context-data"></div></details>
             <section><h3 id="assistant-reminders-title"></h3><p id="assistant-reminder-help" class="subtle"></p><div id="assistant-reminders"></div></section>
             <section><h3 id="assistant-logs-title"></h3><div id="assistant-logs"></div><button id="assistant-add-log" class="text-button" type="button"></button></section>
-            <details><summary id="assistant-tools-title"></summary><div id="assistant-tools"></div></details>
         </aside></div>
     </dialog>`;
 }
@@ -27,6 +26,8 @@ export function getAssistantScript(): string {
             const cancel=document.getElementById('assistant-cancel');
             const clear=document.getElementById('assistant-clear');
             const tr=(en,zh)=>language==='zh-CN'?zh:en;
+            let timer,requestAt=0,currentActivity,resumeButton,lastOutcome='';
+            let activity=new Map();const approvalCards=new Map();
             let busy=false,configured=false,currentReply,lastQuestion='',compatibilityWarning='',state={servers:[],reminders:[],logs:[]},selection;
             function controls(){send.disabled=busy||!configured;cancel.hidden=!busy;clear.disabled=busy;send.setAttribute('aria-busy',String(busy));}
             function labels(){
@@ -42,25 +43,121 @@ export function getAssistantScript(): string {
                 document.getElementById('assistant-reminder-help').textContent=tr('Runs while desktop VS Code is awake.','需要本机 VS Code 运行且电脑未休眠。');
                 document.getElementById('assistant-logs-title').textContent=tr('Task logs','任务日志');
                 document.getElementById('assistant-add-log').textContent=tr('Authorize a log path…','授权日志路径…');
-                document.getElementById('assistant-tools-title').textContent=tr('Query activity','查询记录');
-                if(!busy)status.textContent=configured?t('aiReady'):t('configureAiFirst');
+                if(!busy)setStatus(lastOutcome||(configured?t('aiReady'):t('configureAiFirst')));
                 controls();renderState();
             }
             function entry(role,text){
                 const section=node('section','chat-entry '+role);
                 section.append(node('strong','chat-role',role==='user'?t('you'):role==='error'?t('requestError'):t('assistant')));
-                const body=node('div','chat-text',text||'');section.append(body);messages.append(section);
+                const body=node('div','chat-text',text||'');body.hidden=!text;
+                if(role==='assistant'){const steps=node('div','chat-activity');steps.setAttribute('aria-label',tr('Operation activity','操作过程'));section.append(steps);}
+                section.append(body);messages.append(section);
                 while(messages.childElementCount>32)messages.firstElementChild.remove();return body;
             }
             function nearBottom(){return messages.scrollHeight-messages.scrollTop-messages.clientHeight<70;}
             function answer(message){
                 const follow=nearBottom();
                 if(!currentReply||!currentReply.isConnected)currentReply=entry('assistant','');
+                currentReply.hidden=false;
                 if(typeof message.html==='string')currentReply.innerHTML=message.html;else currentReply.textContent=message.answer||'';
                 for(const pre of currentReply.querySelectorAll('pre')){
                     const copy=button(t('copy'),'code-copy secondary-button',()=>vscode.postMessage({command:'copyAiText',text:pre.querySelector('code')?.textContent||''}));pre.append(copy);
                 }
                 if(follow)messages.scrollTop=messages.scrollHeight;
+            }
+            const statusLabel=node('span');const statusTime=node('span','assistant-status-elapsed');statusTime.setAttribute('aria-hidden','true');status.replaceChildren(statusLabel,statusTime);
+            function setStatus(value){if(statusLabel.textContent!==value)statusLabel.textContent=value;}
+            function toolLabel(name,args={}){
+                const server=state.servers.find(s=>s.id===args.server)?.label||args.server||'';
+                const names={get_fleet_status:tr('Refresh GPU status','刷新 GPU 状态'),inspect_task:tr('Inspect task','查询任务'),inspect_job:tr('Inspect Slurm job','查询 Slurm 作业'),inspect_host:tr('Inspect host resources','检查服务器资源'),read_task_log:tr('Read task log','读取任务日志'),manage_reminders:tr('Manage reminder','处理提醒')};
+                return (names[name]||name)+(server?' · '+server:'')+(args.pid?' · PID '+args.pid:'')+(args.job?' · '+args.job:'')+(args.path?' · '+args.path:'');
+            }
+            function activityLabel(step){
+                if(step.state==='blocked'&&step.phase==='approval')return tr('Waiting for your log authorization','等待你授权读取日志');
+                if(step.name)return toolLabel(step.name,step.args);
+                const phases={preparing:tr('Prepare context and request','准备上下文和请求'),connecting:tr('Connect to AI service','连接 AI 服务'),waiting:tr('Request sent · waiting for model response','请求已发送，等待模型响应'),receiving:tr('Response received · waiting for content','已收到响应，等待内容'),generating:tr('Generating answer','正在生成回答'),tool:tr('Model preparing a tool call','模型正在准备工具调用'),approval:tr('Waiting for your authorization','等待你的授权')};
+                if(step.state==='done')return step.phase==='preparing'?tr('Context prepared','上下文已准备'):tr('Model response received','模型已返回结果');
+                return (phases[step.phase]||tr('Processing','处理中'))+(step.toolName?' · '+toolLabel(step.toolName):'')+(step.endpoint&&step.phase!=='generating'?' · '+step.endpoint:'');
+            }
+            function renderActivity(step){
+                step.element.dataset.state=step.state;
+                const badges={running:tr('In progress','进行中'),done:tr('Done','完成'),error:tr('Failed','失败'),cancelled:tr('Cancelled','已取消'),blocked:tr('Needs authorization','需要授权'),denied:tr('Declined','已拒绝')};
+                step.label.textContent=activityLabel(step);step.badge.textContent=badges[step.state]||'';
+                step.duration.textContent=Math.max(0,Math.floor(((step.finishedAt||Date.now())-step.startedAt)/1000))+tr('s',' 秒');
+                const detail=step.result||step.error||step.text||step.argumentText||[step.endpoint,step.model].filter(Boolean).join(' · ');
+                if(step.details.textContent!==detail)step.details.textContent=detail||'';
+            }
+            function tickActivity(){
+                for(const step of activity.values())if(step.state==='running')renderActivity(step);
+                if(busy&&currentActivity)setStatus(activityLabel(currentActivity));
+                statusTime.textContent=requestAt?' · '+Math.max(0,Math.floor((Date.now()-requestAt)/1000))+tr('s elapsed',' 秒'):'';
+            }
+            function pruneActivity(){
+                const rows=Array.from(messages.querySelectorAll('.assistant-step:not([data-state=running]):not([data-state=blocked]), .ai-approval[data-settled]'));
+                for(const row of rows.slice(0,Math.max(0,rows.length-80))){
+                    const parent=row.parentElement;let notice=parent.querySelector('.activity-compacted');
+                    if(!notice){notice=node('p','subtle activity-compacted');parent.prepend(notice);}
+                    notice.dataset.count=String(Number(notice.dataset.count||0)+1);
+                    notice.textContent=tr('Earlier activity records removed from view: ','较早的过程记录已从界面移除：')+notice.dataset.count;
+                    for(const [id,step] of activity)if(step.element===row)activity.delete(id);
+                    row.remove();
+                }
+            }
+            function recordActivity(message){
+                const follow=nearBottom();
+                if(!currentReply||!currentReply.isConnected)currentReply=entry('assistant','');
+                const id=message.id||message.name||'model';let step=activity.get(id);
+                if(!step){
+                    const element=node('details','assistant-step');const summary=node('summary');
+                    const indicator=node('span','step-indicator');indicator.setAttribute('aria-hidden','true');
+                    const label=node('span','step-label'),badge=node('span','step-badge'),duration=node('span','step-duration');duration.setAttribute('aria-hidden','true');
+                    const details=node('pre');summary.append(indicator,label,badge,duration);element.append(summary,details);
+                    currentReply.parentElement.querySelector('.chat-activity').append(element);
+                    step={id,element,label,badge,duration,details,startedAt:message.startedAt||Date.now(),state:'running'};activity.set(id,step);
+                }
+                for(const [key,value] of Object.entries(message)){
+                    if(value===undefined)continue;
+                    if(key==='args'){
+                        step.argumentText=JSON.stringify(value,null,2).slice(0,8192);
+                        step.args=Object.fromEntries(['server','pid','job','path'].filter(k=>typeof value[k]==='string').map(k=>[k,value[k].slice(0,512)]));
+                    }else step[key]=typeof value==='string'&&value.length>16384?value.slice(0,8192)+'\\n…'+tr('Display excerpt; older details omitted','界面仅显示摘录，部分详情已省略')+'…\\n'+value.slice(-8192):value;
+                }
+                if(step.state==='running')step.finishedAt=undefined;
+                if(step.state!=='running'&&!step.finishedAt)step.finishedAt=Date.now();
+                currentActivity=step;renderActivity(step);pruneActivity();tickActivity();if(follow)messages.scrollTop=messages.scrollHeight;
+            }
+            function beginActivity(){
+                clearInterval(timer);activity=new Map();requestAt=Date.now();lastOutcome='';
+                recordActivity({id:'prepare',phase:'preparing',state:'running',startedAt:requestAt});timer=setInterval(tickActivity,1000);
+            }
+            function finishActivity(state){
+                clearInterval(timer);for(const step of activity.values())if(step.state==='running'||step.state==='blocked'){step.state=state;step.finishedAt=Date.now();renderActivity(step);}
+                tickActivity();
+            }
+            function approvalCard(message){
+                recordActivity({id:message.operationId,phase:'approval',state:'blocked'});
+                const card=node('section','ai-approval');card.setAttribute('aria-label',tr('Log read authorization','日志读取授权'));
+                card.append(node('strong','',tr('Read task log','读取任务日志')),node('span','subtle block',message.label||message.server),node('code','block',message.path),
+                    node('p','subtle',tr('Read up to ','读取末尾最多 ')+message.maxLines+tr(' lines / ',' 行 / ')+Math.round(message.maxBytes/1024)+' KiB'+tr(', sent to ', '，发送至 ')+message.endpoint));
+                const actions=node('div','dialog-actions');
+                for(const [decision,label] of [['once',tr('Allow once and continue','允许本次并继续')],['remember',tr('Always allow this file','始终允许此文件')],['deny',tr('Decline','拒绝')]]){
+                    actions.append(button(label,decision==='once'?'':'secondary-button',()=>{for(const b of actions.querySelectorAll('button'))b.disabled=true;vscode.postMessage({command:'resolveAiApproval',id:message.id,decision});}));
+                }
+                card.append(actions);currentReply.parentElement.querySelector('.chat-activity').append(card);approvalCards.set(message.id,{card,actions});
+                messages.scrollTop=messages.scrollHeight;
+            }
+            function startTurn(question,continuing=false){
+                if(busy||!configured)return;
+                if(resumeButton)resumeButton.disabled=true;
+                compatibilityWarning='';lastQuestion=question;entry('user',continuing?tr('Continue investigation','继续查询'):question);currentReply=entry('assistant','');
+                messages.scrollTop=messages.scrollHeight;prompt.value='';busy=true;cancel.disabled=false;controls();beginActivity();
+                vscode.postMessage(continuing?{command:'continueAi'}:{command:'askAi',question});
+            }
+            function continuationCard(message){
+                const card=node('section','ai-continuation');
+                const text=message.paused?tr('This turn reached your configured budget. Completed queries are saved.','已达到你设置的本轮预算，已完成的查询结果均已保留。'):tr('Completed queries are saved. Retry from the current operation.','已保留已完成的查询，可从当前操作继续。');
+                card.append(node('p','subtle',text));
+                resumeButton=button(message.paused?tr('Continue investigation','继续查询'):tr('Retry and continue','重试并继续'),'',()=>startTurn(lastQuestion,true));card.append(resumeButton);messages.append(card);
             }
             function renderState(){
                 const serverSelect=document.getElementById('assistant-server');
@@ -97,7 +194,7 @@ export function getAssistantScript(): string {
                 const logs=document.createDocumentFragment();
                 for(const log of state.logs){
                     const row=node('div','assistant-log');row.dataset.key=log.server+':'+log.path;row.append(node('code','',log.path));
-                    row.append(button(log.authorized?tr('Revoke','撤销授权'):tr('Authorize','授权'),'text-button',()=>vscode.postMessage({command:'authorizeTaskLog',server:log.server,path:log.path,revoke:log.authorized})));logs.append(row);
+                    row.append(button(log.authorized?tr('Revoke','撤销授权'):tr('Always allow this file','始终允许此文件'),'text-button',()=>vscode.postMessage({command:'authorizeTaskLog',server:log.server,path:log.path,revoke:log.authorized})));logs.append(row);
                 }
                 if(!logs.childNodes.length)logs.append(node('p','subtle',tr('Inspect a task to discover its log, or authorize a known path.','查询任务后可发现日志，也可授权已知路径。')));
                 patchChildren(document.getElementById('assistant-logs'),logs);
@@ -115,35 +212,40 @@ export function getAssistantScript(): string {
             document.getElementById('assistant-add-log').onclick=()=>{
                 let server=state.scope?.server;
                 if(!server&&state.servers.length===1)server=state.servers[0].id;
-                if(!server){status.textContent=tr('Open chat from the relevant GPU first to select its server.','请先从目标 GPU 的“问 AI”入口选择服务器。');return;}
+                if(!server){setStatus(tr('Open chat from the relevant GPU first to select its server.','请先从目标 GPU 的“问 AI”入口选择服务器。'));return;}
                 vscode.postMessage({command:'authorizeTaskLog',server});
             };
-            cancel.onclick=()=>{cancel.disabled=true;vscode.postMessage({command:'cancelAi'});};
-            clear.onclick=()=>{messages.replaceChildren();document.getElementById('assistant-tools').replaceChildren();currentReply=undefined;vscode.postMessage({command:'clearAi'});};
+            cancel.onclick=()=>{cancel.disabled=true;setStatus(tr('Cancelling…','正在取消…'));vscode.postMessage({command:'cancelAi'});};
+            clear.onclick=()=>{clearInterval(timer);activity=new Map();approvalCards.clear();requestAt=0;lastOutcome='';statusTime.textContent='';messages.replaceChildren();currentReply=undefined;resumeButton=undefined;vscode.postMessage({command:'clearAi'});};
             prompt.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&event.keyCode!==229){event.preventDefault();if(!busy)document.getElementById('assistant-form').requestSubmit();}});
             document.getElementById('assistant-form').onsubmit=event=>{
                 event.preventDefault();const question=prompt.value.trim();if(busy||!configured||!question)return;
-                compatibilityWarning='';lastQuestion=question;entry('user',question);currentReply=entry('assistant',tr('Working…','正在查询…'));
-                messages.scrollTop=messages.scrollHeight;prompt.value='';busy=true;cancel.disabled=false;controls();status.textContent=t('thinking');
-                document.getElementById('assistant-tools').replaceChildren();vscode.postMessage({command:'askAi',question});
+                startTurn(question);
             };
             messages.addEventListener('click',event=>{const link=event.target.closest('a[href]');if(link){event.preventDefault();vscode.postMessage({command:'openAiLink',url:link.getAttribute('href')});}});
             window.addEventListener('message',event=>{
                 const message=event.data;if(!message||typeof message!=='object')return;
                 if(message.type==='update'){configured=Boolean(message.aiConfigured&&message.preferences?.['ai.model']);if(dialog.open)labels();}
                 else if(message.type==='aiState'){state=message;renderState();}
+                else if(message.type==='aiApproval')approvalCard(message);
+                else if(message.type==='aiApprovalResult'){const item=approvalCards.get(message.id);if(item){item.actions.replaceChildren(node('span','subtle',message.decision==='deny'?tr('Declined · continuing with other evidence','已拒绝，将使用其他证据'):message.decision==='cancelled'?tr('Cancelled','已取消'):tr('Allowed · continuing automatically','已允许，自动继续查询')));item.card.dataset.settled='true';approvalCards.delete(message.id);pruneActivity();}}
+                else if(message.type==='aiActivity')recordActivity(message);
                 else if(message.type==='aiDelta')answer(message);
                 else if(message.type==='aiResult'){
-                    busy=false;controls();cancel.disabled=false;
-                    if(message.answer){answer(message);status.textContent=compatibilityWarning||t('aiReady');}
-                    else if(message.error){if(currentReply&&!currentReply.textContent.trim())currentReply.parentElement.remove();entry('error',message.error);status.textContent=message.error;if(!prompt.value)prompt.value=lastQuestion;}
+                    busy=false;finishActivity(message.error?(/cancel/i.test(message.error)?'cancelled':'error'):'done');controls();cancel.disabled=false;
+                    if(message.answer){answer(message);lastOutcome=compatibilityWarning||t('aiReady');setStatus(lastOutcome);}
+                    else if(message.error){
+                        const codes={ENOTFOUND:tr('Cannot resolve API hostname','无法解析 API 域名'),EAI_AGAIN:tr('Temporary DNS failure','DNS 解析暂时失败'),ECONNRESET:tr('API connection reset','API 连接被重置'),ECONNREFUSED:tr('API connection refused','API 连接被拒绝'),ETIMEDOUT:tr('API request timed out','API 请求超时')};
+                        if(message.code&&codes[message.code])message.error=codes[message.code]+' ('+message.code+') · '+message.error;
+                        if(currentReply&&!currentReply.textContent.trim())currentReply.hidden=true;entry('error',message.error);lastOutcome=message.error;setStatus(lastOutcome);if(!prompt.value)prompt.value=lastQuestion;}
+                    if(message.paused){lastOutcome=tr('Paused at your configured budget','已按你设置的预算暂停');setStatus(lastOutcome);}
+                    if(message.canContinue)continuationCard(message);
                     currentReply=undefined;
                 } else if(message.type==='aiStep'){
                     if(message.name==='compatibility')compatibilityWarning=message.text;
-                    const names={get_fleet_status:tr('Refresh GPU status','刷新 GPU 状态'),inspect_task:tr('Trace task process','追查任务进程'),inspect_job:tr('Check scheduler','查询调度器'),inspect_host:tr('Check host resources','检查服务器资源'),read_task_log:tr('Read authorized log','读取授权日志'),manage_reminders:tr('Manage reminders','管理提醒')};
-                    const step=node('details','assistant-step');step.append(node('summary','',(names[message.name]||message.name)+' · '+(message.state||'')),node('pre','',message.result||message.text||JSON.stringify(message.args||{},null,2)));document.getElementById('assistant-tools').append(step);
-                } else if(message.type==='aiNotice'){status.textContent=message.error||message.text||'';}
-                else if(message.type==='aiReset'){busy=false;currentReply=undefined;messages.replaceChildren();labels();}
+                    recordActivity(message);
+                } else if(message.type==='aiNotice'){lastOutcome=message.error||message.text||'';setStatus(lastOutcome);}
+                else if(message.type==='aiReset'){busy=false;finishActivity('cancelled');activity=new Map();approvalCards.clear();lastOutcome='';requestAt=0;statusTime.textContent='';currentReply=undefined;resumeButton=undefined;messages.replaceChildren();labels();}
             });
         })();
     `;
@@ -188,6 +290,23 @@ export function getAssistantCss(): string {
         .assistant-sidebar .subtle { line-height: 1.6; }
         .assistant-sidebar button { font-size: 10px; min-height: 24px; }
         .context-server,.assistant-watch,.assistant-log { padding: 7px 0; overflow-wrap: anywhere; }
+        .ai-continuation { padding:10px 0; border-top:1px solid var(--vscode-widget-border); font-size:12px; }
+        .ai-approval { border:1px solid var(--vscode-widget-border); border-radius:5px; padding:12px; margin:6px 0; }
+        .ai-approval code { margin:7px 0; overflow-wrap:anywhere; white-space:pre-wrap; }
+        .ai-approval .dialog-actions { gap:6px; }
+        .ai-approval button { font-size:11px; }
+        .chat-activity { display:grid; gap:6px; margin:0 0 10px; }
+        .assistant-step { min-width:0; border-left:2px solid var(--vscode-widget-border); padding-left:8px; font-size:11px; }
+        .assistant-step summary { display:flex; align-items:center; gap:7px; cursor:pointer; min-height:24px; list-style:none; }
+        .step-label { flex:1; min-width:0; overflow-wrap:anywhere; color:var(--vscode-descriptionForeground); }
+        .step-badge,.step-duration { flex-shrink:0; color:var(--vscode-descriptionForeground); font-size:10px; }
+        .step-indicator { width:10px; height:10px; border:1px solid var(--vscode-descriptionForeground); border-radius:50%; flex-shrink:0; }
+        .assistant-step[data-state=running] .step-indicator { border-color:var(--vscode-widget-border); border-top-color:var(--vscode-focusBorder); animation:activity-spin 1s linear infinite; }
+        .assistant-step[data-state=done] .step-indicator { background:var(--vscode-descriptionForeground); opacity:.5; }
+        .assistant-step[data-state=error],.assistant-step[data-state=blocked] { border-left-color:var(--vscode-editorWarning-foreground); }
+        .assistant-status-elapsed { white-space:nowrap; }
+        @keyframes activity-spin { to { transform:rotate(360deg); } }
+        @media(prefers-reduced-motion:reduce) { .assistant-step[data-state=running] .step-indicator { animation:none; } }
         .assistant-step pre { max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 10px; }
         @media(max-width:680px) { #assistant-sidebar-toggle { display:inline-flex; } .assistant-sidebar:not(.mobile-open) { display:none; } .assistant-layout { grid-template-columns: minmax(0,1fr); overflow: auto; } .assistant-chat { min-height: 320px; } .assistant-sidebar { border-left: 0; border-top: 1px solid var(--vscode-widget-border); } .assistant-context-section:not([open]) ~ section { display:none; } }
     `;

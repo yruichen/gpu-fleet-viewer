@@ -14,6 +14,7 @@ export function getDashboardScript(): string {
     return `
         const vscode = acquireVsCodeApi();
         const content = document.getElementById('content');
+        const detailSidebar = document.getElementById('gpu-details');
         const summaryRoot = document.getElementById('summary');
         const usersRoot = document.getElementById('user-filters');
         const refreshState = document.getElementById('refresh-state');
@@ -399,11 +400,12 @@ export function getDashboardScript(): string {
 
             const main = button('', 'gpu-main', () => {
                 if (settings.showProcesses) {
-                    selectedGpuKey = selected ? undefined : key;
-                    renderFleet();
+                    if(selected)closeInspector();
+                    else {selectedGpuKey=key;renderFleet();detailSidebar.querySelector('button')?.focus({preventScroll:true});}
                 }
             }, settings.showProcesses ? t('inspectGpu') : gpu.name);
             main.setAttribute('aria-expanded', String(Boolean(selected && settings.showProcesses)));
+            main.setAttribute('aria-controls','gpu-details');
             const heading = node('div', 'gpu-heading');
             const identity = node('div', 'gpu-identity');
             identity.append(node('span', 'gpu-index', 'GPU ' + gpu.index), node('strong', 'gpu-name', gpu.name));
@@ -450,12 +452,20 @@ export function getDashboardScript(): string {
             return card;
         }
 
+        function closeInspector(){
+            const trigger=Array.from(content.querySelectorAll('.gpu-tile')).find(card=>card.dataset.key===selectedGpuKey)?.querySelector('.gpu-main');
+            selectedGpuKey=undefined;renderFleet();(trigger||searchInput).focus({preventScroll:true});
+        }
+        document.addEventListener('keydown',event=>{
+            if(event.key==='Escape'&&!detailSidebar.hidden&&!document.querySelector('dialog[open]')){event.preventDefault();closeInspector();}
+        });
         function renderInspector(server, gpu) {
             const key=server.host+':'+gpu.uuid;
-            const inspector=node('section','process-inspector');inspector.dataset.key='inspector:'+gpu.uuid;
+            const inspector=node('section','process-inspector');inspector.dataset.key='inspector:'+key;
             const header=node('header','inspector-header');
-            const title=node('div');title.append(node('strong','',(server.metadata?.alias||server.host)+' · GPU '+gpu.index),node('span','subtle block',gpu.name+' · '+gpu.memory.used+' / '+gpu.memory.total+' · '+gpu.utilization.gpu));
-            header.append(title,button(t('close'),'secondary-button compact-button',()=>{selectedGpuKey=undefined;renderFleet();}));inspector.append(header);
+            const title=node('div');title.id='gpu-details-title';title.append(node('strong','',(server.metadata?.alias||server.host)+' · GPU '+gpu.index),node('span','subtle block',gpu.name+' · '+gpu.memory.used+' / '+gpu.memory.total+' · '+gpu.utilization.gpu));
+            const close=button('','secondary-button compact-button',closeInspector,t('close')+' (Esc)');close.setAttribute('aria-label',t('close'));close.append(icon('x'));
+            header.append(title,close);inspector.append(header);
             const actions=node('div','task-primary-actions');
             const ask=(process)=>window.dispatchEvent(new CustomEvent('openAssistant',{detail:{host:server.host,uuid:gpu.uuid,pid:process?.pid,question:process?taskText('Identify this GPU task and inspect its launcher and progress.','查一下这个 GPU 任务的训练入口和进度。'):taskText('What is running on this GPU?','这张 GPU 在运行什么任务？')}}));
             actions.append(button(taskText('Ask AI','问 AI'),'secondary-button compact-button',()=>ask(selectedTasks.get(key))),button(taskText('Notify when free','释放时提醒我'),'secondary-button compact-button',()=>{vscode.postMessage({command:'watchGpu',host:server.host,uuid:gpu.uuid});window.dispatchEvent(new CustomEvent('openAssistant',{detail:{host:server.host,uuid:gpu.uuid}}));}));inspector.append(actions);
@@ -496,7 +506,7 @@ export function getDashboardScript(): string {
                             const progress=taskProgress.get(server.host+':'+path);
                             if(progress?.progress){
                                 const p=progress.progress;log.append(node('span','block',p.current+'/'+p.total+' '+p.unit+(p.remainingSeconds!==undefined?' · '+taskText('Phase estimate: ','当前阶段估计剩余：')+formatDuration(p.remainingSeconds):'')),node('span','subtle block',taskText('Log updated: ','日志更新：')+new Date(progress.modifiedAt*1000).toLocaleString()));
-                            } else log.append(node('span','subtle block',taskText('Authorize and ask AI to inspect progress.','在 AI 侧栏授权后，可继续查询任务进度。')));
+                            } else log.append(node('span','subtle block',taskText('Ask AI to inspect progress; it will request log authorization if needed.','问 AI 查询进度，需要读取日志时会在对话中请求授权。')));
                             details.append(log);
                         }
                     }
@@ -569,8 +579,6 @@ export function getDashboardScript(): string {
                 const grid = node('div', 'gpu-matrix' + (settings.compactLayout ? ' compact gpu-count-' + columnCount : ''));
                 gpus.forEach(gpu => grid.append(renderGpu(server, gpu, settings)));
                 band.append(grid);
-                const selected = settings.showProcesses && gpus.find(gpu => selectedGpuKey === server.host + ':' + gpu.uuid);
-                if (selected) band.append(renderInspector(server, selected));
             } else if (!server.error) {
                 band.append(node('div', 'empty-state compact-empty', server.hiddenGpuCount ? taskText('All GPUs are hidden in Settings → Servers.','GPU 已全部隐藏，可在设置 → 服务器中调整。') : t('noNvidia')));
             }
@@ -629,6 +637,14 @@ export function getDashboardScript(): string {
                 }
             }
             patchChildren(content, fragment);
+            const details=document.createDocumentFragment();
+            const selectedServer=currentMessage.settings.showProcesses&&currentMessage.data.find(server=>server.gpus.some(gpu=>selectedGpuKey===server.host+':'+gpu.uuid));
+            if(selectedServer)details.append(renderInspector(selectedServer,selectedServer.gpus.find(gpu=>selectedGpuKey===selectedServer.host+':'+gpu.uuid)));
+            else if(detailSidebar.contains(document.activeElement))searchInput.focus({preventScroll:true});
+            const previousDetail=detailSidebar.firstElementChild?.dataset.key;
+            patchChildren(detailSidebar,details);detailSidebar.hidden=!selectedServer;
+            if(previousDetail!==detailSidebar.firstElementChild?.dataset.key)detailSidebar.scrollTop=0;
+            document.getElementById('dashboard-layout').classList.toggle('details-open',Boolean(selectedServer));
             const myUser = currentMessage.preferences && currentMessage.preferences.researchUser;
             myTasksButton.setAttribute('aria-pressed', String(Boolean(myUser && selectedUser === myUser)));
             if (vscode.setState) vscode.setState({ search: searchInput.value, status: statusFilter.value, sort: sortSelect.value,
@@ -723,6 +739,24 @@ export function getDashboardCss(): string {
         .user-chip { min-height: 23px; padding: 2px 7px; color: var(--vscode-foreground); background: var(--vscode-badge-background); font-size: 10px; white-space: nowrap; }
         .user-chip.active { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
         #content { display: grid; gap: 9px; }
+        .dashboard-layout { display:grid; grid-template-columns:minmax(0,1fr); align-items:start; gap:14px; }
+        .dashboard-layout.details-open { grid-template-columns:minmax(0,1fr) minmax(320px,380px); }
+        .gpu-details { position:sticky; top:14px; max-height:calc(100vh - 28px); overflow:auto; min-width:0; border:1px solid var(--vscode-widget-border); border-radius:5px; background:var(--vscode-editor-background); }
+        .gpu-details[hidden] { display:none; }
+        .gpu-details .process-inspector { margin:0; border:0; border-radius:0; }
+        .gpu-details .inspector-header { position:sticky; top:0; z-index:1; padding:10px 12px; background:var(--vscode-editor-background); }
+        .gpu-details .inspector-header > div { min-width:0; overflow-wrap:anywhere; }
+        .gpu-details .task-inspector-layout { grid-template-columns:minmax(0,1fr); }
+        .gpu-details .task-list { max-height:180px; border-right:0; border-bottom:1px solid var(--vscode-widget-border); }
+        .gpu-details .task-details { max-height:none; overflow:visible; }
+        .gpu-details .task-primary-actions, .gpu-details .dialog-actions { flex-wrap:wrap; }
+        .gpu-details .inspector-empty { padding:12px; }
+        #content { container-type:inline-size; }
+        @container(max-width:850px) { .gpu-matrix.compact[class*="gpu-count-"] { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+        @media(max-width:1000px) {
+            .dashboard-layout.details-open { grid-template-columns:minmax(0,1fr); }
+            .gpu-details { position:fixed; inset:12px 12px 12px auto; width:min(420px,calc(100vw - 24px)); max-height:none; z-index:20; box-shadow:0 6px 24px var(--vscode-widget-shadow); }
+        }
         .server-band { min-width: 0; overflow: hidden; border: 1px solid var(--vscode-widget-border); border-left: 2px solid var(--vscode-widget-border); border-radius: 4px; background: var(--vscode-editor-background); }
         .server-band.stale { border-left-color: var(--vscode-editorWarning-foreground); }
         .server-band.offline, .server-band.offline.stale { border-left-color: var(--vscode-descriptionForeground); opacity: .82; }

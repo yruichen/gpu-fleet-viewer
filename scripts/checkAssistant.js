@@ -26,6 +26,21 @@ async function main(){
     const server=http.createServer((req,res)=>{
         let raw='';req.on('data',c=>raw+=c);req.on('end',()=>{
             const body=JSON.parse(raw);requests.push(body);
+            if(body.model==='compaction-check'){
+                assert.ok(Buffer.byteLength(raw)<4*1024*1024,'Compacted history must fit the actual wire format.');
+                const anthropic=req.url.endsWith('/messages');
+                res.setHeader('Content-Type','application/json');res.end(JSON.stringify(anthropic?{content:[{type:'text',text:'Evidence retained'}]}:{choices:[{message:{content:'Evidence retained'}}]}));return;
+            }
+            if(body.model==='long-run'){
+                const completed=body.messages.filter(m=>m.role==='tool').length;
+                const message=completed>=65?{content:'Long investigation complete'}:{content:'',tool_calls:[{id:'long-'+completed,type:'function',function:{name:'get_fleet_status',arguments:'{}'}}]};
+                res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}]}));return;
+            }
+            if(body.model==='approval-model'){
+                const hasResult=body.messages.some(m=>m.role==='tool');
+                const message=hasResult?{content:'Log handled'}:{content:'',tool_calls:[{id:'log-approval',type:'function',function:{name:'read_task_log',arguments:JSON.stringify({server:'host-'+require('crypto').createHash('sha256').update('lab-node').digest('hex').slice(0,16),path:'/work/approval.log'})}}]};
+                res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}]}));return;
+            }
             if(body.model==='no-stream') {
                 if(body.stream){res.statusCode=422;res.end('{}');}else{assert.ok(!body.tools);res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:'Plain GPU chat works'}}]}));}
                 return;
@@ -44,6 +59,8 @@ async function main(){
     const controller=new AiController(context,{postMessage:async m=>messages.push(m)},()=>[],async()=>{});
     try{
         await controller.handle({command:'askAi',question:'What is running? Trace it and notify me when this task ends.'});
+        assert.ok(messages.some(m=>m.type==='aiActivity'&&m.phase==='waiting'),'Model waiting must be visible before any answer text.');
+        assert.ok(messages.filter(m=>m.type==='aiStep'&&m.state==='running').every(m=>m.id),'Each tool operation needs a stable start/end identity.');
         assert.strictEqual(requests.length,4,'The real controller must complete the tool round trip.');
         assert.strictEqual(requests[1].messages.at(-1).role,'tool');
         assert.ok(requests[2].messages.at(-1).content.includes('train.py'));
@@ -51,6 +68,18 @@ async function main(){
         const reminders=state.get('gpu-fleet-viewer.reminders');
         assert.strictEqual(reminders.length,1);assert.strictEqual(reminders[0].identity,'boot:40');assert.strictEqual(reminders[0].pid,'40','A worker reminder must bind to its verified launcher.');
         assert.ok(messages.some(m=>m.type==='aiResult'&&m.html.includes('<strong>Task identified</strong>')));
+        const evidence=[{role:'user',content:'Investigate the full lab workload'}];
+        for(let i=0;i<5000;i++)evidence.push({role:'assistant',content:'',toolCalls:[{id:'evidence-'+i,name:'inspect_task',arguments:{server:'lab',pid:String(i)}}]},
+            {role:'tool',toolCallId:'evidence-'+i,content:'task-'+i+' '+ 'x'.repeat(1024)});
+        controller.compactEvidence(evidence);
+        assert.ok(Buffer.byteLength(JSON.stringify(evidence))<1024*1024,'Many small results must compact as well as large logs.');
+        assert.ok(evidence.some(m=>m.content==='Investigate the full lab workload'));
+        assert.ok(evidence.at(-1).content.includes('task-4999'),'Recent evidence must survive compaction.');
+        for(let i=0;i<evidence.length;i++)if(evidence[i].toolCalls)for(const call of evidence[i].toolCalls)assert.ok(evidence.slice(i+1).some(m=>m.role==='tool'&&m.toolCallId===call.id),'Compaction must retain complete protocol pairs.');
+        const {aiTurn}=require('../out/aiClient');
+        for(const protocol of ['openai','anthropic']){
+            assert.strictEqual((await aiTurn({protocol,baseUrl,model:'compaction-check',apiKey:'dummy-key',timeoutSeconds:5,stream:false},evidence,'',[])).text,'Evidence retained');
+        }
         await assert.rejects(TaskService.get(context).query(TaskService.get(context).hosts()[0].id,'process',{pid:'1'}),/GPU task/,'System ancestors cannot become inspection capabilities.');
         await assert.rejects(TaskService.get(context).query(TaskService.get(context).hosts()[0].id,'process',{pid:'99'}),/GPU task/,'Children cannot become arbitrary inspection capabilities.');
         const count=ssh.length;
@@ -85,6 +114,53 @@ async function main(){
             assert.strictEqual(tasks.state().reminders.find(w=>w.id===future.id).status,'active');
         }finally{Date.now=originalNow;holdQuery=false;}
         await tasks.manage({action:'cancel',id:future.id});
+        values['ai.model']='long-run';
+        const longMessages=[];const long=new AiController(context,{postMessage:async m=>longMessages.push(m)},()=>[],async()=>{});
+        await long.handle({command:'askAi',question:'Investigate all tasks'});
+        assert.ok(longMessages.some(m=>m.type==='aiResult'&&m.answer==='Long investigation complete'),'Default tool flow must pass 48 calls without a hard stop.');long.dispose();
+        values['ai.maxToolCalls']=2;
+        const checkpointMessages=[];const limited=new AiController(context,{postMessage:async m=>checkpointMessages.push(m)},()=>[],async()=>{});
+        await limited.handle({command:'askAi',question:'Investigate tasks'});
+        assert.ok(checkpointMessages.some(m=>m.type==='aiResult'&&m.paused&&m.canContinue));
+        values['ai.maxToolCalls']=0;
+        await limited.handle({command:'continueAi'});
+        assert.ok(checkpointMessages.some(m=>m.type==='aiResult'&&m.answer==='Long investigation complete'),'Continuing must reuse completed tool results.');limited.dispose();
+        values['ai.model']='approval-model';
+        const approvalMessages=[];const withApproval=new AiController(context,{postMessage:async m=>approvalMessages.push(m)},()=>[],async()=>{});
+        const pending=withApproval.handle({command:'askAi',question:'Read the task log'});
+        for(let i=0;i<100&&!approvalMessages.some(m=>m.type==='aiApproval');i++)await new Promise(resolve=>setTimeout(resolve,5));
+        const approval=approvalMessages.find(m=>m.type==='aiApproval');assert.ok(approval,'Approval must appear inline without a native confirmation.');
+        const beforeGrant=ssh.length;
+        await withApproval.handle({command:'resolveAiApproval',id:'wrong-id',decision:'once'});
+        assert.strictEqual(ssh.length,beforeGrant,'Unmatched approvals cannot authorize a read.');
+        await withApproval.handle({command:'resolveAiApproval',id:approval.id,decision:'once'});await pending;
+        assert.ok(ssh.length>beforeGrant,'Allow must automatically resume the suspended tool.');
+        assert.ok(!TaskService.get(context).state().logs.find(l=>l.path==='/work/approval.log')?.authorized,'Allow once must not persist a grant.');
+        assert.ok(approvalMessages.some(m=>m.type==='aiResult'&&m.answer==='Log handled'));
+        withApproval.dispose();
+        for(const decision of ['deny','cancel','remember']){
+            const events=[];const candidate=new AiController(context,{postMessage:async m=>events.push(m)},()=>[],async()=>{});
+            const task=candidate.handle({command:'askAi',question:'Read this task log'});
+            for(let i=0;i<100&&!events.some(m=>m.type==='aiApproval');i++)await new Promise(resolve=>setTimeout(resolve,5));
+            const request=events.find(m=>m.type==='aiApproval');assert.ok(request);
+            const queries=ssh.length;
+            if(decision==='cancel'){
+                await candidate.handle({command:'cancelAi'});await task;
+                await candidate.handle({command:'resolveAiApproval',id:request.id,decision:'remember'});
+            }else{await candidate.handle({command:'resolveAiApproval',id:request.id,decision});await task;}
+            if(decision!=='remember')assert.strictEqual(ssh.length,queries,'Declining/cancelling must not read the log.');
+            else assert.ok(TaskService.get(context).state().logs.find(l=>l.path==='/work/approval.log')?.authorized);
+            if(decision==='cancel'){
+                const resume=candidate.handle({command:'continueAi'});
+                for(let i=0;i<100&&!events.some(m=>m.type==='aiApproval'&&m.id!==request.id);i++)await new Promise(resolve=>setTimeout(resolve,5));
+                const renewed=events.find(m=>m.type==='aiApproval'&&m.id!==request.id);
+                assert.ok(renewed,'Continue must retry the interrupted log operation with a fresh approval.');
+                await candidate.handle({command:'resolveAiApproval',id:renewed.id,decision:'once'});await resume;
+                assert.ok(ssh.length>queries,'Resuming the interrupted operation must actually query SSH.');
+            }
+            candidate.dispose();
+        }
+
         values['ai.model']='no-stream';
         const fallbackMessages=[];const fallback=new AiController(context,{postMessage:async m=>fallbackMessages.push(m)},()=>[],async()=>{});
         const before=requests.length;
@@ -97,7 +173,7 @@ async function main(){
         const restored=TaskService.get(secondContext);
         assert.ok(restored.state().logs.some(log=>log.path==='/work/train.log'&&log.authorized),'Saved log grants must remain visible and revocable after restart.');
         await restored.authorize(host,'/work/train.log',false);
-        assert.ok(!restored.state().logs.some(log=>log.authorized));
+        assert.ok(!restored.state().logs.some(log=>log.path==='/work/train.log'&&log.authorized));
         secondContext.subscriptions.forEach(d=>d.dispose());
         console.log('Assistant tool orchestration, actual monitor parsing, command redaction, persistent reminders and panel-independent lifetime passed.');
     }finally{
